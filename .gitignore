@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# ROS 2 / colcon build artifacts
+**/build/
+**/install/
+**/log/
+
+# Large model / dataset binaries
+*.safetensors
+*.onnx
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.weights
+*.h5
+*.model
+*.mp4
+*.parquet
+*.bag
+
+# LeRobot test artifacts (LFS blobs not shipped in this repo)
+lerobot/tests/artifacts/cameras/
+lerobot/models/smolvla_base/collage_small.gif
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
