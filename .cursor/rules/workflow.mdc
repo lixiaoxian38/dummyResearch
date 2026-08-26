@@ -1,0 +1,57 @@
+---
+description: Dummy 机械臂项目跨设备开发工作流
+alwaysApply: true
+---
+
+# Dummy Research 工作流
+
+## 项目
+
+- 仓库：https://github.com/lixiaoxian38/dummyResearch.git
+- 详细说明见根目录 `AGENTS.md`，进度见 `docs/TODO.md`
+
+## 架构
+
+- **家里 Linux 台式机 = Server**：机械臂 USB、ROS2、MoveIt2、stream_api_server（:8001）
+- **单位 Windows 笔记本 = Client**：Cursor Remote SSH 连家里，不本地跑 ROS
+- **跨网络**：Tailscale 虚拟组网
+- **代码同步**：Git push/pull，不靠 Cursor session
+
+## 关键路径
+
+- MoveIt 工作空间：`dummy_moveit_ws/`
+- LeRobot dummy_stream：`lerobot/src/lerobot/robots/dummy_stream/`
+- HTTP 流式 API：`dummy_moveit_ws/dummy_server/server/stream_api_server.py`
+- 手眼标定：`dummy_moveit_ws/dummy_vision/`
+
+## Cursor 使用规则
+
+- 远程写代码 / 跑 ROS：Remote SSH 到家里 Linux
+- 跨设备续 Agent 对话：Cloud Agent
+- 新 session 先读 `AGENTS.md` 和 `docs/TODO.md`
+- Local session **不能**跨单位↔家里继承
+
+## 启动机械臂（在家里 Linux）
+
+**推荐（傻瓜式）：**
+
+```bash
+cd ~/projects/dummy
+git pull
+bash scripts/home/go.sh
+```
+
+**手动方式：**
+
+```bash
+cd ~/projects/dummy/dummy_moveit_ws && source install/setup.bash
+ros2 launch dummy_moveit_config servo_streaming.launch.py
+python dummy_server/server/stream_api_server.py
+```
+
+## 技术栈
+
+- ROS 2 + MoveIt2 + pymoveit2
+- Python FastAPI（stream API）
+- LeRobot（dummy_stream 机器人类型）
+- Intel D435 + ArUco（手眼标定）
