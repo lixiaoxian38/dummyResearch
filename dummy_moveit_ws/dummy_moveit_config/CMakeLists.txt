@@ -7,20 +7,17 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(moveit_msgs REQUIRED)
-find_package(moveit_servo REQUIRED)
 
+# Keyboard teleop helper. The old C++ Servo library demo uses Humble-era headers
+# (moveit_servo/servo_parameters.h) and does not build on Jazzy; runtime Servo
+# uses ros2 launch + servo_node instead.
 add_executable(dummy_servo_keyboard_input src/servo_keyboard_input.cpp)
 target_include_directories(dummy_servo_keyboard_input PUBLIC include)
 ament_target_dependencies(dummy_servo_keyboard_input std_msgs control_msgs rclcpp)
 
-add_executable(dummy_servo_cpp_interface_demo src/servo_cpp_interface_demo.cpp)
-target_include_directories(dummy_servo_cpp_interface_demo PUBLIC include)
-ament_target_dependencies(dummy_servo_cpp_interface_demo moveit_servo rclcpp)
-
 install(
   TARGETS
     dummy_servo_keyboard_input
-    dummy_servo_cpp_interface_demo
   DESTINATION
     lib/${PROJECT_NAME}
 )

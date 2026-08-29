@@ -3,9 +3,12 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-vision/
 venv/
 .env
 .env.*
+scripts/home/config.env
+.logs/
 
 # IDE
 .idea/

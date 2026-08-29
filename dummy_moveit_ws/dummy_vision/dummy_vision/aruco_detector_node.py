@@ -1,9 +1,10 @@
 # simple Python demo using package cv2 + cv_bridge
+# Intrinsics come from /camera/.../camera_info so D415/D435 both work.
 import cv2
 import rclpy
 from rclpy.node import Node
 from cv_bridge import CvBridge
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PoseStamped
 import tf_transformations
 import tf2_ros
@@ -18,7 +19,16 @@ from tf_transformations import quaternion_multiply, quaternion_matrix
 class ArucoDetector(Node):
     def __init__(self):
         super().__init__('aruco_detector')
-        self.sub = self.create_subscription(Image, '/camera/camera/color/image_raw', self.image_callback, 10)
+        self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
+        self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
+        self.declare_parameter('marker_length', 0.05)
+
+        image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
+        camera_info_topic = self.get_parameter('camera_info_topic').get_parameter_value().string_value
+        self.marker_length = self.get_parameter('marker_length').get_parameter_value().double_value
+
+        self.sub = self.create_subscription(Image, image_topic, self.image_callback, 10)
+        self.sub_info = self.create_subscription(CameraInfo, camera_info_topic, self.camera_info_callback, 10)
         self.br = CvBridge()
         self.pub = self.create_publisher(PoseStamped, '/aruco_target_pose', 10)
         self.pub_cam = self.create_publisher(PoseStamped, '/aruco_camera_pose', 10)
@@ -28,14 +38,10 @@ class ArucoDetector(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # camera_color_optical_frame from ros2 camera_info topic, k is camera_matrix, d is dist_coeffs 
-        self.camera_matrix = np.array([
-            [914.0535, 0.0, 647.0988],
-            [0.0, 914.5477, 372.1199],
-            [0.0, 0.0, 1.0]
-        ])
-        self.dist_coeffs = np.array([0, 0, 0, 0, 0])
-        self.marker_length = 0.05  # meter
+        # Filled from CameraInfo (works for D415 / D435). Optional fallback until first info arrives.
+        self.camera_matrix = None
+        self.dist_coeffs = None
+        self._camera_info_ready = False
 
         # publish pose in every 1 seconds
         self.last_pose_tool = None
@@ -43,7 +49,20 @@ class ArucoDetector(Node):
         self.last_pose_world = None
         self.create_timer(1.0, self.publish_cached_poses)
 
+    def camera_info_callback(self, msg: CameraInfo):
+        self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape(3, 3)
+        self.dist_coeffs = np.array(msg.d, dtype=np.float64)
+        if not self._camera_info_ready:
+            self._camera_info_ready = True
+            self.get_logger().info(
+                f'CameraInfo ready: fx={self.camera_matrix[0, 0]:.2f} fy={self.camera_matrix[1, 1]:.2f} '
+                f'cx={self.camera_matrix[0, 2]:.2f} cy={self.camera_matrix[1, 2]:.2f}'
+            )
+
     def image_callback(self, msg):
+        if not self._camera_info_ready:
+            self.get_logger().warn('Waiting for CameraInfo before ArUco pose estimation...')
+            return
         frame = self.br.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_ARUCO_ORIGINAL)  #DICT_ARUCO_ORIGINAL ,DICT_4X4_50
@@ -88,25 +107,16 @@ class ArucoDetector(Node):
             # make camera_color_optical_frame turn to camera_link, or straight to link6_1_1
             #self.get_logger().info('it frames in buffer:')
             #self.get_logger().info(self.tf_buffer.all_frames_as_string())
+            self.last_pose_cam = pose_in_optical
             try:
                 self.tf_buffer.can_transform("link6_1_1", "camera_color_optical_frame", rclpy.time.Time(), rclpy.duration.Duration(seconds=2.0))
                 transform = self.tf_buffer.lookup_transform("link6_1_1", "camera_color_optical_frame", rclpy.time.Time())
                 self.tf_buffer.can_transform("base_link", "camera_color_optical_frame", rclpy.time.Time(), rclpy.duration.Duration(seconds=2.0))
                 transform_world = self.tf_buffer.lookup_transform("base_link", "camera_color_optical_frame", rclpy.time.Time())
-                #self.get_logger().warn("TF from camera_color_optical_frame to link6_1_1 and base_link is available!!!")
-            except:
+                self.last_pose_tool = self.transform_pose(pose_in_optical, transform)
+                self.last_pose_world = self.transform_pose(pose_in_optical, transform_world)
+            except Exception:
                 self.get_logger().warn("TF from camera_color_optical_frame to link6_1_1 or base_link not available yet")
-            pose_in_tool = self.transform_pose(pose_in_optical, transform)
-            pose_in_world = self.transform_pose(pose_in_optical, transform_world)
-            # self.get_logger().info('okok,now pose_in_tool frame_id:'+pose_in_tool.header.frame_id+', pose_in_world frame_id:'+pose_in_world.header.frame_id)
-
-            # save pose in cache
-            #self.pub.publish(pose_in_tool)
-            #self.pub_cam.publish(pose_in_optical)
-            #self.pub_world.publish(pose_in_world)
-            self.last_pose_tool = pose_in_tool
-            self.last_pose_cam = pose_in_optical
-            self.last_pose_world = pose_in_world
 
             self.get_logger().info('---------------------------------------')
         # else: self.get_logger().info('oh,can not detect any aruco')

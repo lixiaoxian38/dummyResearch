@@ -41,14 +41,9 @@ class USBBulkTransport(fibre.protocol.PacketSource, fibre.protocol.PacketSink):
     return string
 
   def init(self):
-    # Under some conditions, the Linux USB/libusb stack ends up in a corrupt
-    # state where there are a few packets in a receive queue but a call
-    # to epr.read() does not return these packet until a new packet arrives.
-    # This undesirable queue can be cleared by resetting the device.
-    # On windows this would cause file-not-found errors in subsequent dev calls
-    if platform.system() != 'Windows':
-        self.dev.reset()
-
+    # Skip usb Device.reset() on Linux: with Dummy/REF firmware a bus reset
+    # drops the bulk channel and Fibre discovery times out before JSON loads.
+    # If the bus is wedged, replug the cable or run udevadm trigger instead.
     #self.dev.set_configuration() # no args: set first configuration
 
     # Find the best interface

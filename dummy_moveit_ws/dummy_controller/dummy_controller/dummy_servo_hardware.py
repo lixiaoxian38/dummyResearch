@@ -22,15 +22,30 @@ class ServoHardwareStreamer(Node):
         
         try:
             self.my_driver = dummy_controller.dummy_cli_tool.ref_tool.find_any()
-            self.my_driver.robot.set_enable(1)
+            # Enable only — do NOT auto move_j / HOME on connect (DummyStudio may
+            # chain !START then !HOME; we keep motion explicit and user-triggered).
+            self.my_driver.robot.set_enable(True)
             self.my_driver.robot.set_rgb_mode(4)  # green light is ready
+            self.get_logger().info(
+                'Hardware connected: motors enabled, no auto motion. '
+                'Waiting for /servo_node/command trajectories.'
+            )
         except Exception as e:
             self.get_logger().error(f"Failed to connect to hardware: {e}")
             self.my_driver = None
             
         self.current_rad = self.ready_rad.copy()
         if self.my_driver:
-            self.move_rad(self.current_rad)
+            synced = self._read_joint_rad_from_hw()
+            if synced is not None:
+                self.current_rad = synced
+                self.get_logger().info(
+                    f'Synced joint_states from hardware (rad): {np.round(self.current_rad, 4)}'
+                )
+            else:
+                self.get_logger().warn(
+                    'Could not read joint angles; publishing ready_rad zeros until first command.'
+                )
         
         # Subscribe to MoveIt Servo's output topic
         self.servo_sub = self.create_subscription(
@@ -45,6 +60,26 @@ class ServoHardwareStreamer(Node):
         self.timer = self.create_timer(0.02, self.publish_joint_states) # 50Hz
         
         self.get_logger().info('Listening to /servo_node/command for joint trajectories...')
+
+    def _read_joint_rad_from_hw(self):
+        """Read joint angles (deg on fibre) and convert to MoveIt radians."""
+        try:
+            joints = [
+                self.my_driver.robot.joint_1,
+                self.my_driver.robot.joint_2,
+                self.my_driver.robot.joint_3,
+                self.my_driver.robot.joint_4,
+                self.my_driver.robot.joint_5,
+                self.my_driver.robot.joint_6,
+            ]
+            deg = np.array([float(j.angle) for j in joints], dtype=float)
+            # Inverse of rad_fix + rad2degree used when commanding hardware.
+            rad_cmd = deg / 180.0 * self.pai
+            rad = (rad_cmd / self.rad_direct_diff) - self.rad_volumn_diff
+            return rad
+        except Exception as e:
+            self.get_logger().warn(f'Failed to read HW joint angles: {e}')
+            return None
 
     def rad_fix(self, arr_rad):
         return (arr_rad + self.rad_volumn_diff) * self.rad_direct_diff
@@ -101,15 +136,15 @@ class ServoHardwareStreamer(Node):
             self.get_logger().debug(f"Publishing joint states: {msg.position}")
 
     def cleanup(self):
-        self.get_logger().info('Cleaning up dummy arm...')
+        self.get_logger().info('Cleaning up dummy arm (disable only, no auto HOME)...')
         if self.my_driver:
             try:
-                # Check if robot attribute exists before using it
                 if hasattr(self.my_driver, 'robot'):
-                    self.move_rad(self.home_rad)
+                    # Do not move_j on shutdown — avoid unexpected stretch/HOME.
+                    self.my_driver.robot.set_enable(False)
                     self.my_driver.robot.set_rgb_mode(0)
                 else:
-                    self.get_logger().warn("Driver object has no 'robot' attribute, skipping move_j")
+                    self.get_logger().warn("Driver object has no 'robot' attribute")
             except Exception as e:
                 self.get_logger().error(f"Error during cleanup: {e}")
 

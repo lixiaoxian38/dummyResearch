@@ -1,0 +1,4 @@
+# Dummy / ODrive Fibre USB (VID 1209, PID 0d31-0d33)
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="0d31", MODE="0666", GROUP="dialout", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="0d32", MODE="0666", GROUP="dialout", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="0d33", MODE="0666", GROUP="dialout", TAG+="uaccess"

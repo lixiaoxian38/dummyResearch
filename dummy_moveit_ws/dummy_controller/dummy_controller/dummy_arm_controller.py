@@ -20,9 +20,12 @@ class JointTrajectoryActionServer(Node):
         super().__init__('dummy_arm_controller_real')
         self.get_logger().info('Ready to setup dummy arm')
         self.my_driver = dummy_controller.dummy_cli_tool.ref_tool.find_any()
-        self.my_driver.robot.set_enable(1)
-        self.my_driver.robot.set_rgb_mode(4)  #green light is ready
-        self.move_rad(self.ready_rad)
+        # Enable only — no auto move_j / HOME on connect.
+        self.my_driver.robot.set_enable(True)
+        self.my_driver.robot.set_rgb_mode(4)  # green light is ready
+        self.get_logger().info(
+            'Hardware connected: motors enabled, no auto motion until a trajectory goal.'
+        )
         self._action_server = ActionServer(
             self,
             FollowJointTrajectory,
@@ -72,10 +75,12 @@ class JointTrajectoryActionServer(Node):
         return result
 
     def cleanup(self):
-        self.move_rad(self.home_rad)
-        #self.my_driver.robot.set_enable(0)
-        self.my_driver.robot.set_rgb_mode(0)
-        pass
+        # Disable only — do not auto-move to home_rad on shutdown.
+        try:
+            self.my_driver.robot.set_enable(False)
+            self.my_driver.robot.set_rgb_mode(0)
+        except Exception as e:
+            self.get_logger().error(f'Cleanup error: {e}')
 
 def main(args=None):
     rclpy.init(args=args)

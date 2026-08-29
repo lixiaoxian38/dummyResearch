@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/config.env"
 
-ROS_DISTRO="${ROS_DISTRO:-humble}"
+ROS_DISTRO="${ROS_DISTRO:-jazzy}"
 STREAM_API_PORT="${STREAM_API_PORT:-8001}"
 LEROBOT_CONDA_ENV="${LEROBOT_CONDA_ENV:-lerobot}"
 TMUX_SESSION="${TMUX_SESSION:-dummy}"
@@ -21,17 +21,22 @@ if [[ -f "${CONFIG_FILE}" ]]; then
   source "${CONFIG_FILE}"
 fi
 
+# ROS setup.bash 会读未导出的 AMENT_* 变量；在 set -u 下必须临时关掉 nounset
 if [[ -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
+  set +u
   # shellcheck disable=SC1091
   source "/opt/ros/${ROS_DISTRO}/setup.bash"
+  set -u
 else
-  echo "❌ 未找到 ROS ${ROS_DISTRO}，请先安装 ROS 2 Humble"
+  echo "❌ 未找到 ROS ${ROS_DISTRO}，请先安装: bash scripts/home/install_ros2_jazzy.sh"
   exit 1
 fi
 
 if [[ -f "${WS_DIR}/install/setup.bash" ]]; then
+  set +u
   # shellcheck disable=SC1091
   source "${WS_DIR}/install/setup.bash"
+  set -u
 else
   echo "⚠️  工作空间未编译，请先运行: bash scripts/home/setup_once.sh"
 fi

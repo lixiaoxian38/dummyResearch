@@ -33,10 +33,10 @@ def generate_launch_description():
         arguments=["0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "world", "base_link"],
     )
 
-    # The servo node from MoveIt 2
+    # The servo node from MoveIt 2 (Jazzy executable is servo_node, not servo_node_main)
     servo_node = Node(
         package="moveit_servo",
-        executable="servo_node_main",
+        executable="servo_node",
         name="servo_node",
         parameters=[
             servo_params,
