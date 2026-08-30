@@ -4,32 +4,30 @@
 
 ## 进行中
 
-- [ ] `move_j` / Servo 键盘 jog 仍「抖动但不跟位」——明天用 Windows DummyStudio 对比
-- [ ] 电源建议改回 **12V ≥6A**（20V 能动但更抖；`get_voltage()`≈3.3 仅为逻辑电参考）
+- [ ] 把 CDC ASCII 接到 ROS：`dummy_servo_hardware` 改为发 `>j1..j6`（替代 Fibre `move_j`）
 - [ ] 眼在手上 TF + ArUco 跟随闭环
 - [ ] 单位 Windows：Tailscale + Cursor Remote SSH
+- [ ] 电源建议日常用 **12V ≥6A**（20V 能动但更抖）
 
 ## 已完成（续）
 
-- [x] D415 连接 + RealSense SDK；ArUco demo 成功
-- [x] 安装 ROS 2 Jazzy + colcon；Servo 冒烟启动
-- [x] Dummy 口 `1209:0d32`；跳过 USB `Device.reset()` 后 Fibre 稳定
-- [x] 连接时仅 `set_enable`、**不自动 HOME**；可读六轴角度
-- [x] 串口 `!START` 成功；Fibre `homing()` 真机可展开成「7」字
-- [x] 键盘 jog topic 对齐 `/servo_node/...`；`env.sh` 兼容 `set -u`
-- [x] 脚本：`keyboard_jog.sh`、`arm_start_and_nudge.sh`、udev 规则草稿
+- [x] **根因**：DummyStudio 走 USB **CDC 串口 ASCII**，不是 Fibre bulk；Fibre `move_j` 只会抖不跟位
+- [x] Linux 串口验证：`!START` → `#CMDMODE 2` → `#GETJPOS` → `>j…`，Joint2 真机跟随
+- [x] 六轴拖动 GUI：`scripts/home/dummy_slider_gui.py`（已实测可拖）
+- [x] 线索入库：`docs/windows_cdc_control.md` / `.json`
+- [x] Windows D 盘持久挂载脚本：`scripts/home/setup_windows_mounts.sh`（ntfs-3g）
+- [x] D415 / ROS Jazzy / Fibre 发现 / 不自动 HOME 等（见前序提交）
 
 ## 已完成
 
 - [x] 仓库推送到 GitHub：`lixiaoxian38/dummyResearch`
 - [x] 工作方式：家里 Linux Server + 单位 Windows Remote SSH + Tailscale
 - [x] 本机克隆 `/home/lxx/Projects/dummyResearch`；git / ssh / Tailscale 就绪
-- [x] GitHub SSH remote 可 push
 
 ## 备注
 
 - 主机：`lxx01` / 用户 `lxx` / 路径 `/home/lxx/Projects/dummyResearch`
-- Tailscale IP：`100.75.232.68`；LAN：`192.168.31.172`
-- ROS：**Jazzy**（文档里常写 Humble）
-- Dummy：Fibre `usb`；串口 `!START` 需 `dialout`（或 sudo）；ACM=`/dev/ttyACM0`
-- 已知：多开 launch/RViz 会污染 `/joint_states`；勿整段 `sudo` 跑 Fibre（缺 pyusb）
+- 控制口：`/dev/ttyACM0`，`1209:0d32`，115200，协议见 `docs/windows_cdc_control.md`
+- 「7」字复位：`0, -73, 180, 0, 0, 0`
+- GUI：`python3 scripts/home/dummy_slider_gui.py`
+- 挂载：D=`/mnt/win_data`，C=`/mnt/windows`（需 fstab + ntfs-3g）

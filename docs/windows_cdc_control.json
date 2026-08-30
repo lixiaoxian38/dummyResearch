@@ -1,0 +1,60 @@
+{
+  "title": "交接：Windows DummyStudio 能连通的办法（给本机 Linux 上的 Cursor 读）",
+  "warning": "不要在 Cursor 云端虚拟机里验证机械臂。云端没有 REF 的 USB。",
+  "source": "同一台双系统电脑，Windows 上 DummyStudio 已能连接并拖动。Linux 侧按同一条路径复现即可。",
+  "windows": {
+    "what": "DummyStudio 打开的是 REF 板的 USB CDC 虚拟串口，不是 Fibre/WinUSB 调试口。",
+    "device_name": "Robot Embedded Framework REF … CDC Interface",
+    "usb": {
+      "vid": "1209",
+      "pid": "0d32"
+    },
+    "port": "COMx（设备管理器里那个 CDC 口）",
+    "baud_rate": 115200,
+    "serial_format": "8N1",
+    "protocol": "文本 ASCII",
+    "line_end": "\\n / \\r",
+    "response_end": "\\r\\n",
+    "sequence": [
+      "独占打开 COM",
+      "!START → 应答 Started ok（使能电机）",
+      "#CMDMODE 2（实时覆盖，滑条才能拖）",
+      "#GETJPOS 读六个关节角（度）",
+      "拖动时发 >j1,j2,j3,j4,j5,j6（可带速度）"
+    ],
+    "commands": {
+      "start": "!START",
+      "start_ok": "Started ok",
+      "cmdmode_realtime": "#CMDMODE 2",
+      "get_joint_pos": "#GETJPOS",
+      "set_joints": ">j1,j2,j3,j4,j5,j6"
+    },
+    "reset_pose_deg": [0, -73, 180, 0, 0, 0],
+    "reset_pose_note": "复位「7」字姿态"
+  },
+  "linux": {
+    "cdc_device": "/dev/ttyACM*",
+    "must_use": "同一串 ASCII，CDC 映射成 /dev/ttyACM*",
+    "do_not_use": "reftool --path usb（Fibre bulk）。那会和内核 cdc_acm 抢接口，Windows 能拖、Linux 拖不动就是这个差。",
+    "verify_same_usb_as_windows": [
+      "lsusb -d 1209:0d32",
+      "bash scripts/linux_setup.sh",
+      "python3 -m dummy_arm diagnose",
+      "python3 -m dummy_arm ping --port auto",
+      "python3 -m dummy_arm serve --port auto"
+    ],
+    "pass_criteria": {
+      "diagnose.machine": "local_linux（不是 cloud_vm）",
+      "can_control_hardware": true,
+      "usb": "能看到 1209:0d32 和 /dev/ttyACM*",
+      "ping": "能打出六个关节角",
+      "web": "网页里 !START 后拖滑条，臂会动"
+    },
+    "failures": {
+      "only_10c4_ea60": "USB 插反，那是 CP2102 调试口，DummyStudio 不用",
+      "permission_denied": "没加入 dialout 或没重新登录",
+      "port_exists_no_reply": "ModemManager 抢走 ttyACM，或脚本在用 Fibre 而不是 CDC ASCII"
+    }
+  },
+  "later": "手眼标定等功能：等上面 ping + 拖动通过后再做。"
+}
