@@ -100,19 +100,18 @@ sudo ufw allow 8001/tcp
 
 ## 三、单位 Windows：Cursor Remote SSH
 
-### 一次性配置
+**详细步骤见 [`docs/CURSOR_REMOTE.md`](docs/CURSOR_REMOTE.md)**
 
-1. 安装 Cursor（Windows 版）
-2. 安装扩展：**Remote - SSH**
-3. 安装并登录 Tailscale
+### 快速配置
 
-**SSH 配置**（`C:\Users\你的用户名\.ssh\config`）：
-
+**家里 Linux（一次性）：**
+```bash
+bash scripts/remote/setup_home_ssh.sh
 ```
-Host dummy-home
-    HostName 100.64.1.5
-    User 你的Linux用户名
-    IdentityFile ~/.ssh/id_ed25519
+
+**单位 Windows（一次性）：**
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\remote\setup_work_cursor.ps1
 ```
 
 ### 每次远程开发
