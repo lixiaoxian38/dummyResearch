@@ -1,0 +1,11 @@
+{
+  "name": "stow",
+  "description": "Folded rest after power-on. Return here before power-off or any restart that drops motor torque (kill bridge, rebuild live stack, toggle dry_run).",
+  "saved_at": "2026-09-06",
+  "source": "Firmware power-on #GETJPOS (same pose after every USB re-enum today).",
+  "frame": "firmware_joint_degrees",
+  "joints": ["J1", "J2", "J3", "J4", "J5", "J6"],
+  "fw_deg": [0.0, -75.0, 180.0, 0.0, 0.0, 0.0],
+  "raw_read_fw_deg": [0.0, -75.0, 180.0, -0.04, 0.05, -0.04],
+  "usage": "bash scripts/home/stow.sh"
+}

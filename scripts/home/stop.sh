@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# 停止机械臂服务
+# 停止机械臂服务。默认先收起臂（断电前必须）；SKIP_STOW=1 可跳过。
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/env.sh"
+
+if [[ "${SKIP_STOW:-0}" != "1" ]]; then
+  echo "收起机械臂（SKIP_STOW=1 跳过）..."
+  bash "${SCRIPT_DIR}/stow.sh" || echo "WARN: stow failed — do not power off until the arm is folded"
+fi
 
 if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
   tmux kill-session -t "${TMUX_SESSION}"

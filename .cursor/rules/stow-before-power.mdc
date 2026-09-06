@@ -1,0 +1,27 @@
+---
+description: Stow Dummy arm before power-off or any limp-inducing restart
+alwaysApply: true
+---
+
+# 断电 / 脱力重启前必须先收起
+
+收起姿态（FW 度，上电默认位）：`[0, -75, 180, 0, 0, 0]`  
+文件：`scripts/home/poses/stow.json`  
+命令：`bash scripts/home/stow.sh`
+
+在做下面任一事前，**先 stow，再动代码/杀进程/断电**：
+
+- 用户说断电、收工、关机
+- 关 LIVE / 改 `dry_run` / 重启 tracker、CDC bridge、Servo、`go.sh` / `stop.sh`
+- 重编译或重启会让电机瞬间丢力矩的节点（杀 bridge = 臂脱力）
+
+没看到 `/dev/ttyACM0` 就先等 USB，**不要在伸开的姿态下杀 bridge**。
+
+# 启动标定板跟随：先回 handeye
+
+用户说启动跟随 / LIVE / 标定板跟踪时，**先回手眼起始位**再开 tracker：
+
+`[-8.7, 20, 90, 0, 60, 0]` — `scripts/home/poses/handeye_start.json`  
+`python3 scripts/home/cdc_home_seven.py --preset handeye`（串口需空闲）
+
+详细流程见 `.cursor/skills/dummy-arm-ops/SKILL.md`。

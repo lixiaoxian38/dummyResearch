@@ -35,6 +35,11 @@ source "${WS}/install/setup.bash"
 
 echo "eye_in_hand track  dry_run=${DRY_RUN}  use_easy_handeye=${USE_EASY}"
 
+if [[ "${DRY_RUN}" == "false" ]]; then
+  echo "LIVE: reset to handeye start pose first"
+  python3 "${REPO_ROOT}/scripts/home/cdc_home_seven.py" --preset handeye --steps 8
+fi
+
 ros2 launch dummy_vision eye_in_hand_track.launch.py \
   dry_run:=${DRY_RUN} \
   start_servo:=${START_SERVO} \

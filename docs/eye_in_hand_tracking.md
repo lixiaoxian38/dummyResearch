@@ -58,16 +58,25 @@ ros2 launch dummy_vision eye_in_hand_publish.launch.py publish_optical_stub:=tru
 
 **先打印标定板：** [`scripts/vision/aruco_markers/aruco_original_id0_50mm_a4.pdf`](../scripts/vision/aruco_markers/aruco_original_id0_50mm_a4.pdf)（100% 比例，黑色方块 50mm）
 
-一键（推荐）：
+**起始关节位（FW 度，已固化）：** `handeye` = `[-8.7, 20, 90, 0, 60, 0]`  
+见 [`scripts/home/poses/handeye_start.json`](../scripts/home/poses/handeye_start.json)。标定前：
+
+```bash
+# 串口需空闲（先关 cdc_servo_bridge / 滑条 GUI）
+python3 scripts/home/cdc_home_seven.py --preset handeye
+```
+
+一键（推荐，脚本内会先回 handeye）：
 
 ```bash
 bash scripts/home/calibrate_eye_in_hand.sh
+# 已在目标位可跳过回零: SKIP_HOME=1 bash scripts/home/calibrate_eye_in_hand.sh
 python3 scripts/vision/check_calibration_ready.py   # 可选：检查 TF / 话题
 ```
 
 手动步骤：
 
-1. 启动机械臂 TF（MoveIt / `servo_streaming` 或 `demo`），保证 `base_link`、`link6_1_1` 在 TF 树中。
+1. 回 handeye 起始位（上），再启动机械臂 TF（MoveIt / `servo_streaming` 或 `demo`），保证 `base_link`、`link6_1_1` 在 TF 树中。
 2. 标定板固定在桌上，相机在腕部，保证多数姿态能看见板。
 3. 启动：
 
@@ -113,7 +122,10 @@ ros2 launch dummy_vision eye_in_hand_track.launch.py \
 | 参数 | 默认 | 含义 |
 |---|---|---|
 | `dry_run` | true | 不发 `/servo_node/delta_twist_cmds` |
-| `desired_marker_in_ee_z` | 0.25 | 期望标定板在 EE 前方距离 (m) |
+| `control_frame` | optical | `optical`：把板保持在光轴/画面中心；`ee`：旧的法兰 +Z |
+| `hold_current_distance` | true | 只纠画面 XY，保持当前相机到板距离 |
+| `desired_marker_in_ee_z` | 0.25 | 仅当 `hold_current_distance:=false` 时用的目标深度 (m) |
+| `ws_around_current` | 0.08 | 期望 EE 相对当前位的软半径 (m)，避免冲向固定角落 |
 | `follow_orientation` | true | 跟随板倾斜 |
 | `max_linear_vel` | 0.08 | 线速度上限 (m/s) |
 | `max_angular_vel` | 0.4 | 角速度上限 (rad/s) |

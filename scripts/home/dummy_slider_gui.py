@@ -270,7 +270,8 @@ class SliderApp(tk.Tk):
                 )
                 self.after(0, lambda: self._set_status(text))
             except Exception as e:
-                self.after(0, lambda: self._set_status(f"发送失败: {e}"))
+                err = str(e)
+                self.after(0, lambda msg=err: self._set_status(f"发送失败: {msg}"))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -291,7 +292,8 @@ class SliderApp(tk.Tk):
                 else:
                     self.after(0, lambda: self._set_status(f"解析失败: {raw!r}"))
             except Exception as e:
-                self.after(0, lambda: self._set_status(f"读角失败: {e}"))
+                err = str(e)
+                self.after(0, lambda msg=err: self._set_status(f"读角失败: {msg}"))
 
         threading.Thread(target=work, daemon=True).start()
 

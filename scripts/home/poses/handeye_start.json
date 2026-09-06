@@ -1,0 +1,10 @@
+{
+  "name": "handeye_start",
+  "description": "User-tuned eye-in-hand calibration start pose (FW degrees, economy CDC).",
+  "saved_at": "2026-09-06",
+  "frame": "firmware_joint_degrees",
+  "joints": ["J1", "J2", "J3", "J4", "J5", "J6"],
+  "fw_deg": [-8.7, 20.0, 90.0, 0.0, 60.0, 0.0],
+  "raw_read_fw_deg": [-8.67, 20.0, 90.0, -0.04, 60.04, -0.01],
+  "usage": "python3 scripts/home/cdc_home_seven.py --preset handeye"
+}

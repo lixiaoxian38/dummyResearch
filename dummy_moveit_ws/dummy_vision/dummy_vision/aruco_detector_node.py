@@ -15,6 +15,7 @@ import tf_transformations
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import Buffer, TransformListener
 from tf_transformations import quaternion_matrix, quaternion_multiply
@@ -73,8 +74,19 @@ class ArucoDetector(Node):
         else:
             self._aruco_params = cv2.aruco.DetectorParameters()
 
-        self.create_subscription(Image, image_topic, self.image_callback, 10)
-        self.create_subscription(CameraInfo, camera_info_topic, self.camera_info_callback, 10)
+        # RealSense QoS varies (RELIABLE vs BEST_EFFORT); subscribe both.
+        for reliability in (ReliabilityPolicy.RELIABLE, ReliabilityPolicy.BEST_EFFORT):
+            for durability in (DurabilityPolicy.VOLATILE, DurabilityPolicy.TRANSIENT_LOCAL):
+                qos = QoSProfile(
+                    depth=5,
+                    reliability=reliability,
+                    durability=durability,
+                    history=HistoryPolicy.KEEP_LAST,
+                )
+                self.create_subscription(Image, image_topic, self.image_callback, qos)
+                self.create_subscription(
+                    CameraInfo, camera_info_topic, self.camera_info_callback, qos
+                )
         self.br = CvBridge()
         self.pub_tool = self.create_publisher(PoseStamped, "/aruco_target_pose", 10)
         self.pub_cam = self.create_publisher(PoseStamped, "/aruco_camera_pose", 10)

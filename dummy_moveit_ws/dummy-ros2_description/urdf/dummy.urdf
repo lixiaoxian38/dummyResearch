@@ -271,14 +271,15 @@
     <parent link="link1_1_1"/>
     <child link="link2_1_1"/>
     <axis xyz="1.0 0.0 -0.0"/>
-    <limit effort="150" lower="-1.308997" upper="1.570796" velocity="3.15"/>
+    <!-- Software limits (MoveIt). Hardware/REF allows past old -75°/±90°; keep room for 7-pose servoing. -->
+    <limit effort="150" lower="-2.094395" upper="1.745329" velocity="3.15"/>
   </joint>
   <joint name="Joint3" type="revolute">
     <origin rpy="0 0 0" xyz="0.032 0.0 0.146"/>
     <parent link="link2_1_1"/>
     <child link="link3_1_1"/>
     <axis xyz="1.0 -0.0 -0.0"/>
-    <limit effort="150" lower="-1.570796" upper="1.570796" velocity="3.15"/>
+    <limit effort="150" lower="-2.617994" upper="2.617994" velocity="3.15"/>
   </joint>
   <joint name="Joint4" type="revolute">
     <origin rpy="0 0 0" xyz="-0.017 -0.0175 0.052"/>

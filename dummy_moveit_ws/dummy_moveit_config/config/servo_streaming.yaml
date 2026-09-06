@@ -42,7 +42,12 @@ num_outgoing_halt_msgs_to_publish: 4
 ## Configure handling of singularities and joint limits
 lower_singularity_threshold: 1000000.0
 hard_stop_singularity_threshold: 2000000.0
-joint_limit_margin: 0.1
+# Small buffer; large values make 7-pose look "permanently halted".
+joint_limit_margins: [0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+# Critical: if true, ONE joint near limit freezes the WHOLE arm (feels like a deadlock
+# even when the board moves back / twist would leave the limit).
+halt_all_joints_in_cartesian_mode: false
+halt_all_joints_in_joint_mode: false
 leaving_singularity_threshold_multiplier: 2.0
 
 ## Topic names

@@ -33,7 +33,8 @@ bash scripts/home/go.sh
 |---|---|
 | `bash scripts/home/go.sh` | pull + 编译 + 启动（推荐） |
 | `bash scripts/home/start.sh` | 只启动服务 |
-| `bash scripts/home/stop.sh` | 停止服务 |
+| `bash scripts/home/stow.sh` | **断电前收起**到「7」字 `[0,-75,180,0,0,0]` |
+| `bash scripts/home/stop.sh` | 先 stow，再停服务（`SKIP_STOW=1` 跳过收起） |
 | `bash scripts/home/status.sh` | 查看状态 |
 | `bash scripts/home/lerobot.sh` | 启动 LeRobot 手机遥操作 |
 | `tmux attach -t dummy` | 进入后台日志窗口 |
