@@ -25,7 +25,7 @@ fi
 # shellcheck disable=SC1091
 source "${VENV_DIR}/bin/activate"
 python -m pip install -U pip
-python -m pip install "pyrealsense2==2.58.3.10794"
+python -m pip install "pyrealsense2==2.58.3.10794" pillow
 
 echo ""
 echo "验证："
@@ -44,5 +44,6 @@ echo "=========================================="
 echo " 完成。请用虚拟环境里的 python 运行："
 echo "   source ${VENV_DIR}/bin/activate"
 echo "   python scripts/vision/print_d415_intrinsics.py"
-echo "   python scripts/vision/d415_aruco_demo.py --serial 033522060492"
+echo "   python scripts/vision/d415_aruco_demo.py --serial 033522060492
+python scripts/vision/generate_aruco_a4_pdf.py   # A4 标定板 PDF"
 echo "=========================================="

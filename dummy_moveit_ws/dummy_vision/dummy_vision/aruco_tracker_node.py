@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""DEPRECATED: point-to-point MoveIt tracker with hardcoded paths.
+
+Use aruco_servo_tracker_node (Servo twist + dry_run) instead:
+  ros2 run dummy_vision aruco_servo_tracker_node
+  ros2 launch dummy_vision eye_in_hand_track.launch.py
+"""
 
 import rclpy
 from rclpy.node import Node
@@ -12,6 +18,10 @@ import numpy as np
 class ArucoTracker(Node):
     def __init__(self):
         super().__init__('track_aruco')
+        self.get_logger().warn(
+            'aruco_tracker_node is DEPRECATED; use aruco_servo_tracker_node / '
+            'eye_in_hand_track.launch.py'
+        )
         # init space
         # set range
         x_min, x_max = -0.25, 0.25
@@ -19,7 +29,27 @@ class ArucoTracker(Node):
         z_min, z_max = 0.0, 0.5
         # collect space
         xs, ys, zs, colors = [], [], [], []
-        with open('/home/hata_ros/apps/dummy_ws/src/dummy_controller/dummy_controller/'+'result.csv', newline='') as csvfile:
+        import os as _os
+        candidates = [
+            _os.path.abspath(
+                _os.path.join(
+                    _os.path.dirname(__file__),
+                    '..',
+                    '..',
+                    '..',
+                    'dummy_controller',
+                    'dummy_controller',
+                    'result.csv',
+                )
+            ),
+            '/home/hata_ros/apps/dummy_ws/src/dummy_controller/dummy_controller/result.csv',
+        ]
+        csvfile_path = next((p for p in candidates if _os.path.isfile(p)), None)
+        if csvfile_path is None:
+            raise FileNotFoundError(
+                'result.csv not found; this node is deprecated — use aruco_servo_tracker_node'
+            )
+        with open(csvfile_path, newline='') as csvfile:
             reader = csv.DictReader(csvfile)
             for row in reader:
                 x = float(row['x'])

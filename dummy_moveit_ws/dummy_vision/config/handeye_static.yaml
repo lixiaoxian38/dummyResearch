@@ -1,0 +1,19 @@
+# Placeholder eye-in-hand extrinsics: link6_1_1 -> camera_link
+# Replace with easy_handeye2 result (~/.ros2/easy_handeye2/calibrations/dummy_eih_calib.calib)
+# after collecting samples at home. Values are a rough "camera on flange looking forward"
+# guess for RViz / dry-run only — NOT for live grasping.
+#
+# Convention (ROS static_transform_publisher xyz yaw pitch roll OR xyz qx qy qz qw):
+# parent: link6_1_1
+# child:  camera_link
+parent_frame: link6_1_1
+child_frame: camera_link
+translation: [0.0, 0.0, 0.05]   # meters: 5 cm along EE +Z
+rotation_rpy: [0.0, 0.0, 0.0]   # radians
+# Optical stub is off by default (RealSense publishes it). Enable via launch:
+#   publish_optical_stub:=true
+publish_optical_stub: false
+optical_child_frame: camera_color_optical_frame
+# camera_link -> optical: ROS optical (Z forward, X right, Y down) ≈ rpy(-π/2, 0, -π/2)
+optical_translation: [0.0, 0.0, 0.0]
+optical_rotation_rpy: [-1.57079632679, 0.0, -1.57079632679]

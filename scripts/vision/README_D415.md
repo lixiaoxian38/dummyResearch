@@ -33,7 +33,15 @@ python scripts/vision/d415_aruco_demo.py --serial 033522060492 --marker-length 0
 
 1. 安装 ROS2（Ubuntu 24.04 建议 Jazzy）
 2. 安装 `realsense2_camera`
-3. `colcon build` 工作空间后启动相机 + `aruco_detector_node`
+3. `colcon build` 工作空间后启动相机 + 眼在手上追踪（默认 dry_run）
+
+```bash
+cd ~/Projects/dummyResearch/dummy_moveit_ws
+colcon build --packages-select dummy_vision && source install/setup.bash
+ros2 launch dummy_vision eye_in_hand_track.launch.py dry_run:=true
+```
+
+详见 [`docs/eye_in_hand_tracking.md`](../../docs/eye_in_hand_tracking.md)。
 
 ## 推荐 USB
 
