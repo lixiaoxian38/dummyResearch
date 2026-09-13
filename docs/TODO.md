@@ -8,8 +8,8 @@
 - [ ] 经济款 **J3 方向取反**：核对固件 / 线序 / ROS 方向补偿只在一处生效（见 `docs/ref固件与经济款DH笔记.md`）
 - [ ] **眼在手上追踪（分阶段）** — 说明见 `docs/eye_in_hand_tracking.md`
   - [x] 视觉 dry-run：`aruco_detector` Rodrigues 姿态 + marker TF；`aruco_servo_tracker`；launch / 静态外参
-  - [ ] 本地标定采集：`eye_in_hand_calibrate.launch.py` + easy_handeye2 Save `dummy_eih_calib`
-  - [ ] CDC 后真机追踪：光轴/画面中心跟随（`control_frame:=optical`，已改代码；USB 掉线后待重插再测）
+  - [x] 本地标定采集：15 样本 Compute+Save（`link5_1_1→camera_link`，平移约 1.9/−4.8/1.3 cm）
+  - [ ] CDC 后真机追踪：J6 轴对板心、法兰平面距板 20 cm（锁目标周期规划；昨晚两点徘徊已定位）
 - [ ] 单位 Windows：Tailscale + Cursor Remote SSH
 - [ ] 电源建议日常用 **12V ≥6A**（20V 能动但更抖）
 
@@ -35,9 +35,9 @@
 - 主机：`lxx01` / 用户 `lxx` / 路径 `/home/lxx/Projects/dummyResearch`
 - 控制口：`/dev/ttyACM0`，`1209:0d32`，115200，协议见 `docs/windows_cdc_control.md`
 - 「7」字复位：`0, -73, 180, 0, 0, 0`
-- **手眼标定起始位 `handeye`（FW）**：`[-8.7, 20, 90, 0, 60, 0]` — `python3 scripts/home/cdc_home_seven.py --preset handeye`；见 `scripts/home/poses/handeye_start.json`
+- **跟随起始位 `handeye`（FW）**：`[0, 0, 90, 0, 0, 0]`（J1/J2=0，J3=90，J4/J5 从 0° 起）— `python3 scripts/home/cdc_home_seven.py --preset handeye`；旧标定位 `handeye_calib` J5=60
 - **收起 `stow`（上电位）**：`[0, -75, 180, 0, 0, 0]` — 断电或任何会脱力的重启前先 `bash scripts/home/stow.sh`
-- **启动跟随先回 `handeye`**：`[-8.7, 20, 90, 0, 60, 0]` — `bash scripts/home/start_board_track.sh`
+- **启动跟随先回 `handeye`**：`[0, 0, 90, 0, 0, 0]` — `bash scripts/home/start_board_track.sh`
 - GUI：`python3 scripts/home/dummy_slider_gui.py`
 - 挂载：D=`/mnt/win_data`，C=`/mnt/windows`（需 fstab + ntfs-3g）
 - 结构件：**经济款**；J3 方向见 `docs/ref固件与经济款DH笔记.md`

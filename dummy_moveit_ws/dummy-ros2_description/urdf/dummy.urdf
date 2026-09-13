@@ -264,42 +264,42 @@
     <parent link="base_link"/>
     <child link="link1_1_1"/>
     <axis xyz="0.0 0.0 1.0"/>
-    <limit effort="150" lower="-3.141593" upper="3.141593" velocity="3.15"/>
+    <limit effort="150" lower="-3.14159" upper="3.14159" velocity="3.15"/>
   </joint>
   <joint name="Joint2" type="revolute">
     <origin rpy="0 0 0" xyz="-0.017 -0.035 0.0375"/>
     <parent link="link1_1_1"/>
     <child link="link2_1_1"/>
     <axis xyz="1.0 0.0 -0.0"/>
-    <!-- Software limits (MoveIt). Hardware/REF allows past old -75°/±90°; keep room for 7-pose servoing. -->
-    <limit effort="150" lower="-2.094395" upper="1.745329" velocity="3.15"/>
+    <!-- URDF = hardware; CDC keeps a 1.5° bumper (scripts/home/joint_limits_fw.py). -->
+    <limit effort="150" lower="-2.09440" upper="1.74533" velocity="3.15"/>
   </joint>
   <joint name="Joint3" type="revolute">
     <origin rpy="0 0 0" xyz="0.032 0.0 0.146"/>
     <parent link="link2_1_1"/>
     <child link="link3_1_1"/>
     <axis xyz="1.0 -0.0 -0.0"/>
-    <limit effort="150" lower="-2.617994" upper="2.617994" velocity="3.15"/>
+    <limit effort="150" lower="-2.61799" upper="2.61799" velocity="3.15"/>
   </joint>
   <joint name="Joint4" type="revolute">
     <origin rpy="0 0 0" xyz="-0.017 -0.0175 0.052"/>
     <parent link="link3_1_1"/>
     <child link="link4_1_1"/>
     <axis xyz="0.0 -1.0 0.0"/>
-    <limit effort="150" lower="-3.14" upper="3.14" velocity="3.15"/>
+    <limit effort="150" lower="-3.14159" upper="3.14159" velocity="3.15"/>
   </joint>
   <joint name="Joint5" type="revolute">
     <origin rpy="0 0 0" xyz="-0.0176 -0.1025 0.0"/>
     <parent link="link4_1_1"/>
     <child link="link5_1_1"/>
     <axis xyz="-1.0 -0.0 0.0"/>
-    <limit effort="150" lower="-1.570796" upper="1.570796" velocity="3.15"/>
+    <limit effort="150" lower="-1.57080" upper="1.57080" velocity="3.15"/>
   </joint>
   <joint name="Joint6" type="revolute">
     <origin rpy="0 0 0" xyz="0.0186 -0.0565 0.0"/>
     <parent link="link5_1_1"/>
     <child link="link6_1_1"/>
     <axis xyz="0.0 1.0 -0.0"/>
-    <limit effort="150" lower="-3.14" upper="3.14" velocity="3.15"/>
+    <limit effort="150" lower="-3.14159" upper="3.14159" velocity="3.15"/>
   </joint>
 </robot>

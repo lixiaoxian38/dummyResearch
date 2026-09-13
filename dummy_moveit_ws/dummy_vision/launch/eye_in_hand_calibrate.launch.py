@@ -44,7 +44,8 @@ def _setup_calibrate(context, *args, **kwargs):
                 "name": calib_name,
                 "calibration_type": "eye_in_hand",
                 "robot_base_frame": "base_link",
-                "robot_effector_frame": "link6_1_1",
+                # Camera is on the J5 housing, not the J6 flange.
+                "robot_effector_frame": "link5_1_1",
                 "tracking_base_frame": "camera_link",
                 "tracking_marker_frame": "camera_marker",
             }.items(),

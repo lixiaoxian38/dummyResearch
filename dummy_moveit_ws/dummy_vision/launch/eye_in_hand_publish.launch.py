@@ -56,7 +56,7 @@ def _setup(context, *args, **kwargs):
     with open(yaml_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    parent = cfg.get("parent_frame", "link6_1_1")
+    parent = cfg.get("parent_frame", "link5_1_1")
     child = cfg.get("child_frame", "camera_link")
     xyz = cfg.get("translation", [0.0, 0.0, 0.05])
     rpy = cfg.get("rotation_rpy", [0.0, 0.0, 0.0])

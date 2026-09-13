@@ -19,8 +19,12 @@ from moveit_msgs.srv import ServoCommandType
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import JointState
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
+from trajectory_msgs.msg import JointTrajectory
+
+from dummy_vision.follow_trace import FollowTrace, ros_rad_to_fw_deg
 
 
 def pose_from_matrix(mat: np.ndarray, frame_id: str, stamp) -> PoseStamped:
@@ -79,30 +83,54 @@ class ArucoServoTracker(Node):
         self.declare_parameter("control_rate_hz", 50.0)
         self.declare_parameter("dry_run", True)
         self.declare_parameter("follow_orientation", True)
-        # optical: keep board on camera optical axis (image center). ee: legacy flange +Z.
-        self.declare_parameter("control_frame", "optical")
+        # ee: flange (link6) aims at board; optical: keep board on camera axis.
+        self.declare_parameter("control_frame", "ee")
         self.declare_parameter("optical_frame", "camera_color_optical_frame")
-        # If true, keep current camera-to-board distance and only center XY in the image.
-        self.declare_parameter("hold_current_distance", True)
+        # If true (optical mode), keep current camera-to-board distance (XY only).
+        self.declare_parameter("hold_current_distance", False)
 
-        # Desired marker in the chosen control frame (meters).
-        # optical + (0,0,z): board on optical axis, z in front of the lens.
+        # Dummy Joint6 axis is link6 +Y (URDF). Camera sits ~1.3 cm off that axis
+        # and looks along -Y, so aiming -Y at the board keeps the marker in view.
+        # Standoff 0.20 m is along that axis, flange plane ⟂ J6.
         self.declare_parameter("desired_marker_in_ee_x", 0.0)
         self.declare_parameter("desired_marker_in_ee_y", 0.0)
-        self.declare_parameter("desired_marker_in_ee_z", 0.25)
+        self.declare_parameter("desired_marker_in_ee_z", 0.20)
         # Desired marker orientation relative to control frame (RPY, rad).
         self.declare_parameter("desired_marker_rpy", [0.0, 0.0, 0.0])
 
         self.declare_parameter("linear_gain", 1.0)
         self.declare_parameter("angular_gain", 1.0)
-        self.declare_parameter("max_linear_vel", 0.03)
-        self.declare_parameter("max_angular_vel", 0.15)
-        self.declare_parameter("pos_deadband", 0.005)
+        self.declare_parameter("max_linear_vel", 0.05)
+        self.declare_parameter("max_angular_vel", 0.25)
+        self.declare_parameter("pos_deadband", 0.0025)
         self.declare_parameter("ori_deadband", 0.02)
         self.declare_parameter("lost_timeout_sec", 1.0)
         self.declare_parameter("max_marker_z", 0.50)
         self.declare_parameter("max_marker_xy", 0.18)
         self.declare_parameter("max_marker_jump", 0.12)
+        # Visible-set guard. Hysteresis: hold (do not invert) when XY is large.
+        self.declare_parameter("keep_in_view_xy", 0.10)
+        self.declare_parameter("keep_in_view_resume_xy", 0.06)
+        self.declare_parameter("leave_view_step", 0.012)
+        # Lock one EE goal and drive. Do NOT replan just because EE cartesian
+        # is close — that chased ArUco noise and walked off a good aim.
+        self.declare_parameter("replan_period_sec", 4.0)
+        self.declare_parameter("replan_reach_m", 0.015)
+        # Optical success: image-center + 20 cm. Hold until the board moves.
+        self.declare_parameter("hold_xy_m", 0.005)
+        self.declare_parameter("hold_z_m", 0.012)
+        self.declare_parameter("hold_resume_xy_m", 0.012)
+        self.declare_parameter("hold_resume_z_m", 0.025)
+        # If the board is off-center, only slide in the image plane first.
+        self.declare_parameter("center_first_xy_m", 0.035)
+        self.declare_parameter("center_done_xy_m", 0.018)
+        self.declare_parameter("replan_opt_change_m", 0.045)
+        self.declare_parameter("replan_min_sec", 0.80)
+        self.declare_parameter("stall_sec", 4.0)
+        self.declare_parameter("opt_filter_alpha", 0.35)
+        self.declare_parameter("leave_hold_sec", 0.40)
+        self.declare_parameter("trace_dir", "/tmp/dummy_track_ctrl/runs")
+        self.declare_parameter("trace_every_n", 5)
 
         # Absolute workspace box (base_link). Ignored when ws_around_current > 0.
         self.declare_parameter("ws_x_min", -0.50)
@@ -112,7 +140,7 @@ class ArucoServoTracker(Node):
         self.declare_parameter("ws_z_min", 0.05)
         self.declare_parameter("ws_z_max", 0.45)
         # Clip desired EE to current EE ± this (m). Prevents lunging to a stale box corner.
-        self.declare_parameter("ws_around_current", 0.08)
+        self.declare_parameter("ws_around_current", 0.12)
 
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.ee_frame = str(self.get_parameter("ee_frame").value)
@@ -155,10 +183,34 @@ class ArucoServoTracker(Node):
         )
         self.pub_desired = self.create_publisher(PoseStamped, "/tracking/desired_ee_pose", 10)
         self.pub_twist = self.create_publisher(TwistStamped, twist_topic, twist_qos)
+        self.create_subscription(JointState, "/joint_states", self._on_joints, 10)
+        self.create_subscription(JointTrajectory, "/servo_node/command", self._on_servo, 10)
 
         self._last_marker_ok = False
         self._last_opt_xyz: np.ndarray | None = None
+        self._last_cmd_xy: float | None = None
+        self._view_mode = "track"
+        self._view_hold = False
+        self._latch_T: np.ndarray | None = None
+        self._latch_t = 0.0
+        self._latch_reason = ""
+        self._latch_opt: np.ndarray | None = None
+        self._phase = ""
+        self._best_opt_err: float | None = None
+        self._stall_t = 0.0
+        self._stall_replans = 0
+        self._opt_filt: np.ndarray | None = None
+        self._des_filt: np.ndarray | None = None
+        self._v_filt: np.ndarray | None = None
+        self._leave_hold_t = 0.0
+        self._reject_n = 0
+        self._joints_fw: list[float] | None = None
+        self._servo_fw: list[float] | None = None
         self._hold_z: float | None = None
+        self._trace = FollowTrace(
+            str(self.get_parameter("trace_dir").value),
+            every_n=int(self.get_parameter("trace_every_n").value),
+        )
         self._last_warn_ns = 0
         self._last_status_ns = 0
         self._last_moving = False
@@ -185,6 +237,8 @@ class ArucoServoTracker(Node):
             self.get_logger().info(
                 "dry_run=true: publishing /tracking/desired_ee_pose only; no Servo twists"
             )
+        if self._trace.path:
+            self.get_logger().info(f"follow trace → {self._trace.path}")
 
     def _ensure_servo_twist_mode(self):
         if self._servo_ready or self.dry_run:
@@ -232,6 +286,32 @@ class ArucoServoTracker(Node):
 
         fut.add_done_callback(_after_type)
 
+    def _on_joints(self, msg: JointState) -> None:
+        if len(msg.position) >= 6:
+            self._joints_fw = ros_rad_to_fw_deg(msg.position[:6])
+
+    def _on_servo(self, msg: JointTrajectory) -> None:
+        if msg.points and len(msg.points[0].positions) >= 6:
+            self._servo_fw = ros_rad_to_fw_deg(msg.points[0].positions[:6])
+
+    def _clear_latch(self, why: str) -> None:
+        if self._latch_T is not None:
+            self._trace.write_event("latch_clear", reason=why)
+        self._latch_T = None
+        self._latch_reason = ""
+        self._latch_opt = None
+        self._view_hold = False
+        self._last_cmd_xy = None
+        self._best_opt_err = None
+        self._stall_t = 0.0
+        if why in ("stale", "reject"):
+            self._phase = ""
+            self._stall_replans = 0
+            self._opt_filt = None
+            self._des_filt = None
+            self._v_filt = None
+            self._leave_hold_t = 0.0
+
     def control_tick(self):
         stamp = self.get_clock().now().to_msg()
         try:
@@ -274,6 +354,7 @@ class ArucoServoTracker(Node):
             self._last_moving = False
             self._hold_z = None
             self._last_opt_xyz = None
+            self._clear_latch("stale")
             return
         T_optical_marker = tf_to_matrix(tf_optical_marker)
         mx, my, mz = (float(T_optical_marker[i, 3]) for i in range(3))
@@ -287,6 +368,9 @@ class ArucoServoTracker(Node):
             if float(np.linalg.norm(opt_xyz - self._last_opt_xyz)) > max_jump:
                 bad = True
         if bad:
+            self._reject_n += 1
+            if self._reject_n < 5:
+                return
             self._publish_zero_twist(stamp)
             if self._last_marker_ok:
                 self.get_logger().warn(
@@ -294,14 +378,17 @@ class ArucoServoTracker(Node):
                 )
             self._last_marker_ok = False
             self._last_moving = False
+            self._clear_latch("reject")
             return
 
         if not self._last_marker_ok:
             self.get_logger().info(
                 f"BOARD DETECTED — tracking opt=[{mx:.3f},{my:.3f},{mz:.3f}]"
             )
+            self._trace.write_event("board_detected", opt=[mx, my, mz])
         self._last_marker_ok = True
         self._last_opt_xyz = opt_xyz
+        self._reject_n = 0
 
         T_base_ee = tf_to_matrix(tf_base_ee)
         T_base_optical = tf_to_matrix(tf_base_optical)
@@ -309,52 +396,53 @@ class ArucoServoTracker(Node):
         T_optical_ee = tf_transformations.inverse_matrix(T_ee_optical)
         T_base_marker = T_base_optical @ T_optical_marker
 
-        if self.control_frame == "optical":
-            # Translate EE by the camera-XY error only. Lock standoff on first lock
-            # so a receding false step cannot ratchet distance out.
-            dx = float(self.get_parameter("desired_marker_in_ee_x").value)
-            dy = float(self.get_parameter("desired_marker_in_ee_y").value)
-            if bool(self.get_parameter("hold_current_distance").value):
-                if self._hold_z is None:
-                    self._hold_z = mz
-                # ignore z error
-                slide_opt = np.array([mx - dx, my - dy, 0.0], dtype=float)
-            else:
-                dz = float(self.get_parameter("desired_marker_in_ee_z").value)
-                slide_opt = np.array([mx - dx, my - dy, mz - dz], dtype=float)
-            T_base_ee_des = T_base_ee.copy()
-            T_base_ee_des[:3, 3] = T_base_ee[:3, 3] + T_base_optical[:3, :3] @ slide_opt
-        else:
-            # Legacy: marker on EE +Z (usually not the image center).
-            T_base_ee_des = T_base_marker @ self._T_marker_ee_des
-
-        if not self.follow_orientation:
-            T_base_ee_des[:3, :3] = T_base_ee[:3, :3]
-
-        # Soft clamp: first around current EE, then optional absolute box.
-        around = float(self.get_parameter("ws_around_current").value)
+        now_s = self.get_clock().now().nanoseconds / 1e9
         p_now = T_base_ee[:3, 3]
-        if around > 1e-4:
-            T_base_ee_des[:3, 3] = np.clip(
-                T_base_ee_des[:3, 3], p_now - around, p_now + around
+        xy_now = math.hypot(mx, my)
+
+        if self.control_frame == "optical":
+            T_des_raw, T_base_ee_des = self._plan_optical(
+                mx, my, mz, T_base_ee, T_base_optical, now_s
             )
-        ws = {
-            "x": (
-                float(self.get_parameter("ws_x_min").value),
-                float(self.get_parameter("ws_x_max").value),
-            ),
-            "y": (
-                float(self.get_parameter("ws_y_min").value),
-                float(self.get_parameter("ws_y_max").value),
-            ),
-            "z": (
-                float(self.get_parameter("ws_z_min").value),
-                float(self.get_parameter("ws_z_max").value),
-            ),
-        }
-        for i, axis in enumerate(("x", "y", "z")):
-            lo, hi = ws[axis]
-            T_base_ee_des[i, 3] = float(np.clip(T_base_ee_des[i, 3], lo, hi))
+        else:
+            # J6 axis (link6 ±Y) through board center; flange plane ⟂ axis at standoff.
+            # Keep current EE +X (projected) so ArUco yaw does not spin J6.
+            dz = float(self.get_parameter("desired_marker_in_ee_z").value)
+            T_base_ee_des = self._ee_axis_on_board(
+                T_base_marker, T_base_ee, dz, align_normal=self.follow_orientation
+            )
+            T_des_raw = T_base_ee_des.copy()
+            T_des_inst = self._clip_desired(T_base_ee_des, T_base_ee)
+            keep_xy = float(self.get_parameter("keep_in_view_xy").value)
+            resume_xy = float(self.get_parameter("keep_in_view_resume_xy").value)
+            replan_period = float(self.get_parameter("replan_period_sec").value)
+            reach_m = float(self.get_parameter("replan_reach_m").value)
+            if keep_xy > 1e-4 and xy_now > keep_xy:
+                self._view_hold = True
+            elif xy_now < resume_xy:
+                self._view_hold = False
+            reached = False
+            if self._latch_T is not None:
+                reached = float(np.linalg.norm(self._latch_T[:3, 3] - p_now)) < reach_m
+            in_view = xy_now < resume_xy if resume_xy > 1e-4 else True
+            need_replan = in_view and (
+                self._latch_T is None
+                or reached
+                or (now_s - self._latch_t) >= replan_period
+            )
+            if need_replan:
+                why = "first" if self._latch_T is None else ("reached" if reached else "period")
+                self._latch_goal(T_des_inst, T_des_raw, [mx, my, mz], p_now, why)
+            if self._latch_T is None:
+                T_base_ee_des = T_base_ee.copy()
+                self._view_mode = "WAIT_LOCK"
+            elif self._view_hold:
+                T_base_ee_des = T_base_ee.copy()
+                self._view_mode = "KEEP_VIEW hold"
+            else:
+                T_base_ee_des = self._latch_T
+                self._view_mode = "track"
+        self._last_cmd_xy = xy_now
 
         desired_pose = pose_from_matrix(T_base_ee_des, self.base_frame, stamp)
         self.pub_desired.publish(desired_pose)
@@ -369,10 +457,17 @@ class ArucoServoTracker(Node):
         v = self.linear_gain * p_err
         w = self.angular_gain * w_err if self.follow_orientation else np.zeros(3)
 
-        if np.linalg.norm(p_err) < self.pos_db:
+        if np.linalg.norm(p_err) < self.pos_db or self._view_mode.endswith("hold"):
             v[:] = 0.0
+            self._v_filt = np.zeros(3)
         if np.linalg.norm(w_err) < self.ori_db:
             w[:] = 0.0
+
+        if self._v_filt is None:
+            self._v_filt = v.copy()
+        else:
+            self._v_filt = 0.65 * self._v_filt + 0.35 * v
+        v = self._v_filt
 
         v = self._clamp_vec(v, self.max_lin)
         w = self._clamp_vec(w, self.max_ang)
@@ -384,6 +479,8 @@ class ArucoServoTracker(Node):
             self._last_status_ns = now_ns
             self._last_moving = moving
             state = "MOVING toward target" if moving else "HOLD (err small / ws clamp)"
+            if self._view_mode != "track":
+                state = self._view_mode
             ox, oy, oz = (float(T_optical_marker[i, 3]) for i in range(3))
             self.get_logger().info(
                 f"{state} |err|={err_norm*100:.1f}cm "
@@ -391,6 +488,34 @@ class ArucoServoTracker(Node):
                 f"opt_marker=[{ox:.3f},{oy:.3f},{oz:.3f}] "
                 f"des=[{T_base_ee_des[0,3]:.3f},{T_base_ee_des[1,3]:.3f},{T_base_ee_des[2,3]:.3f}]"
             )
+
+        y_ee = T_base_ee[:3, 1]
+        y_n = max(float(np.linalg.norm(y_ee)), 1e-9)
+        y_hat = y_ee / y_n
+        p_m = T_base_marker[:3, 3]
+        axis_along = float(np.dot(p_m - p_now, -y_hat))
+        axis_miss = float(np.linalg.norm(np.cross(p_m - p_now, y_hat)))
+        self._trace.maybe_sample(
+            {
+                "mode": self._view_mode,
+                "opt": [mx, my, mz],
+                "marker": p_m.tolist(),
+                "ee": p_now.tolist(),
+                "des": T_base_ee_des[:3, 3].tolist(),
+                "des_raw": T_des_raw[:3, 3].tolist(),
+                "latch": None if self._latch_T is None else self._latch_T[:3, 3].tolist(),
+                "latch_reason": self._latch_reason,
+                "p_err": p_err.tolist(),
+                "v": v.tolist(),
+                "w": w.tolist(),
+                "axis_along_m": axis_along,
+                "axis_miss_m": axis_miss,
+                "joints_fw": self._joints_fw,
+                "servo_fw": self._servo_fw,
+                "dry_run": self.dry_run,
+                "phase": self._phase,
+            }
+        )
 
         if self.dry_run:
             return
@@ -405,6 +530,196 @@ class ArucoServoTracker(Node):
         twist.twist.angular.y = float(w[1])
         twist.twist.angular.z = float(w[2])
         self.pub_twist.publish(twist)
+
+    def _latch_goal(
+        self,
+        T_des: np.ndarray,
+        T_des_raw: np.ndarray,
+        opt: list[float],
+        p_now: np.ndarray,
+        why: str,
+    ) -> None:
+        self._latch_T = T_des.copy()
+        self._latch_t = self.get_clock().now().nanoseconds / 1e9
+        self._latch_reason = why
+        self._latch_opt = np.array(opt, dtype=float)
+        self._best_opt_err = None
+        self._stall_t = self._latch_t
+        self._trace.write_event(
+            "replan",
+            reason=why,
+            opt=opt,
+            ee=p_now.tolist(),
+            des=self._latch_T[:3, 3].tolist(),
+            des_raw=T_des_raw[:3, 3].tolist(),
+            phase=self._phase,
+        )
+        self.get_logger().info(
+            f"REPLAN ({why}/{self._phase or '-'}) "
+            f"des={np.round(self._latch_T[:3, 3], 3).tolist()} "
+            f"opt=[{opt[0]:.3f},{opt[1]:.3f},{opt[2]:.3f}]"
+        )
+
+    def _optical_slide(self, mx: float, my: float, mz: float, *, xy_only: bool) -> np.ndarray:
+        dx = float(self.get_parameter("desired_marker_in_ee_x").value)
+        dy = float(self.get_parameter("desired_marker_in_ee_y").value)
+        if xy_only or bool(self.get_parameter("hold_current_distance").value):
+            if bool(self.get_parameter("hold_current_distance").value) and self._hold_z is None:
+                self._hold_z = mz
+            slide = np.array([mx - dx, my - dy, 0.0], dtype=float)
+            n = float(np.linalg.norm(slide))
+            if n > 0.04:
+                slide *= 0.04 / n
+            return slide
+        dz = float(self.get_parameter("desired_marker_in_ee_z").value)
+        slide = np.array([mx - dx, my - dy, mz - dz], dtype=float)
+        n = float(np.linalg.norm(slide))
+        if n > 0.04:
+            slide *= 0.04 / n
+        return slide
+
+    def _plan_optical(
+        self,
+        mx: float,
+        my: float,
+        mz: float,
+        T_base_ee: np.ndarray,
+        T_base_optical: np.ndarray,
+        now_s: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Continuous optical servo: every tick slide toward image-center + 20 cm.
+
+        Do not lock a Cartesian waypoint. Latch/replan was the start-stop jerk.
+        """
+        dx = float(self.get_parameter("desired_marker_in_ee_x").value)
+        dy = float(self.get_parameter("desired_marker_in_ee_y").value)
+        dz = float(self.get_parameter("desired_marker_in_ee_z").value)
+        hold_xy = float(self.get_parameter("hold_xy_m").value)
+        hold_z = float(self.get_parameter("hold_z_m").value)
+        resume_xy = float(self.get_parameter("hold_resume_xy_m").value)
+        resume_z = float(self.get_parameter("hold_resume_z_m").value)
+        center_xy = float(self.get_parameter("center_first_xy_m").value)
+        center_done = float(self.get_parameter("center_done_xy_m").value)
+        alpha = float(np.clip(self.get_parameter("opt_filter_alpha").value, 0.05, 1.0))
+        leave_hold = float(self.get_parameter("leave_hold_sec").value)
+
+        raw = np.array([mx, my, mz], dtype=float)
+        if self._opt_filt is None:
+            self._opt_filt = raw
+        else:
+            self._opt_filt = (1.0 - alpha) * self._opt_filt + alpha * raw
+        mx, my, mz = (float(self._opt_filt[i]) for i in range(3))
+
+        xy_now = math.hypot(mx - dx, my - dy)
+        z_err = abs(mz - dz)
+        on_target = xy_now <= hold_xy and z_err <= hold_z
+        p_now = T_base_ee[:3, 3]
+
+        if self._phase == "hold":
+            leaving = xy_now > resume_xy or z_err > resume_z
+            if leaving:
+                if self._leave_hold_t <= 0.0:
+                    self._leave_hold_t = now_s
+                if (now_s - self._leave_hold_t) < leave_hold:
+                    self._view_mode = "ON_TARGET hold"
+                    return T_base_ee.copy(), T_base_ee.copy()
+                self._phase = "approach" if xy_now <= resume_xy else "center"
+                self._leave_hold_t = 0.0
+                self._des_filt = None
+                self._trace.write_event("board_moved", opt=[mx, my, mz], ee=p_now.tolist())
+            else:
+                self._leave_hold_t = 0.0
+                self._view_mode = "ON_TARGET hold"
+                return T_base_ee.copy(), T_base_ee.copy()
+
+        if on_target:
+            if self._phase != "hold":
+                self._trace.write_event("on_target", opt=[mx, my, mz], ee=p_now.tolist())
+                self.get_logger().info(
+                    f"ON TARGET — hold xy={xy_now*100:.1f}cm z={mz*100:.1f}cm"
+                )
+            self._phase = "hold"
+            self._leave_hold_t = 0.0
+            self._des_filt = p_now.copy()
+            self._view_mode = "ON_TARGET hold"
+            return T_base_ee.copy(), T_base_ee.copy()
+
+        if self._phase == "center":
+            xy_only = xy_now > center_done
+        else:
+            xy_only = xy_now > center_xy
+        self._phase = "center" if xy_only else "approach"
+        slide_opt = self._optical_slide(mx, my, mz, xy_only=xy_only)
+        T_inst = T_base_ee.copy()
+        T_inst[:3, 3] = T_base_ee[:3, 3] + T_base_optical[:3, :3] @ slide_opt
+        if not self.follow_orientation:
+            T_inst[:3, :3] = T_base_ee[:3, :3]
+        T_raw = T_inst.copy()
+        T_inst = self._clip_desired(T_inst, T_base_ee)
+        p_des = T_inst[:3, 3]
+        if self._des_filt is None:
+            self._des_filt = p_des.copy()
+        else:
+            self._des_filt = 0.72 * self._des_filt + 0.28 * p_des
+        T_smooth = T_base_ee.copy()
+        T_smooth[:3, 3] = self._des_filt
+        self._latch_T = T_smooth
+        self._view_mode = f"track {self._phase}"
+        return T_raw, T_smooth
+
+    @staticmethod
+    def _ee_axis_on_board(
+        T_base_marker: np.ndarray,
+        T_base_ee: np.ndarray,
+        standoff_m: float,
+        *,
+        align_normal: bool,
+    ) -> np.ndarray:
+        """Place flange so J6 axis (link6 −Y) aims at the board center.
+
+        Dummy Joint6 is URDF +Y on link6, not +Z. The D415 sits ~1 cm off that
+        axis and looks along −Y, so −Y through the board keeps the marker in view.
+        Marker +Z comes out of the printed face; desired −Y is −marker_z.
+        Yaw about the axis is taken from the current EE +X, not from ArUco.
+        """
+        p_m = T_base_marker[:3, 3]
+        if align_normal:
+            z_m = T_base_marker[:3, 2]
+            n = float(np.linalg.norm(z_m))
+            pointing = (-z_m / n) if n > 1e-9 else (-T_base_ee[:3, 1])
+            pointing = pointing / max(float(np.linalg.norm(pointing)), 1e-9)
+            y_ee = -pointing
+            x_cur = T_base_ee[:3, 0]
+            x_proj = x_cur - float(np.dot(x_cur, y_ee)) * y_ee
+            if float(np.linalg.norm(x_proj)) < 1e-4:
+                x_cur = T_base_ee[:3, 2]
+                x_proj = x_cur - float(np.dot(x_cur, y_ee)) * y_ee
+            x_ee = x_proj / max(float(np.linalg.norm(x_proj)), 1e-9)
+            z_ee = np.cross(x_ee, y_ee)
+            z_ee = z_ee / max(float(np.linalg.norm(z_ee)), 1e-9)
+            x_ee = np.cross(y_ee, z_ee)
+            R = np.column_stack((x_ee, y_ee, z_ee))
+        else:
+            R = T_base_ee[:3, :3]
+            y_ee = T_base_ee[:3, 1]
+            y_ee = y_ee / max(float(np.linalg.norm(y_ee)), 1e-9)
+            pointing = -y_ee
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = p_m - float(standoff_m) * pointing
+        return T
+
+    def _clip_desired(self, T_des: np.ndarray, T_ee: np.ndarray) -> np.ndarray:
+        out = T_des.copy()
+        around = float(self.get_parameter("ws_around_current").value)
+        p_now = T_ee[:3, 3]
+        if around > 1e-4:
+            out[:3, 3] = np.clip(out[:3, 3], p_now - around, p_now + around)
+        for i, axis in enumerate(("x", "y", "z")):
+            lo = float(self.get_parameter(f"ws_{axis}_min").value)
+            hi = float(self.get_parameter(f"ws_{axis}_max").value)
+            out[i, 3] = float(np.clip(out[i, 3], lo, hi))
+        return out
 
     def _broadcast_desired_tf(self, pose: PoseStamped):
         tf_msg = TransformStamped()
@@ -438,6 +753,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     finally:
+        node._trace.close()
         node.destroy_node()
         rclpy.shutdown()
 

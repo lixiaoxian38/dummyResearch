@@ -1,12 +1,12 @@
-# Placeholder eye-in-hand extrinsics: link6_1_1 -> camera_link
+# Placeholder eye-in-hand extrinsics: link5_1_1 (J5 housing) -> camera_link
+# Camera is mounted on the J5 shell; J6 does not move the camera.
 # Replace with easy_handeye2 result (~/.ros2/easy_handeye2/calibrations/dummy_eih_calib.calib)
-# after collecting samples at home. Values are a rough "camera on flange looking forward"
-# guess for RViz / dry-run only — NOT for live grasping.
+# after collecting samples at home. NOT for live grasping until calibrated.
 #
 # Convention (ROS static_transform_publisher xyz yaw pitch roll OR xyz qx qy qz qw):
-# parent: link6_1_1
+# parent: link5_1_1
 # child:  camera_link
-parent_frame: link6_1_1
+parent_frame: link5_1_1
 child_frame: camera_link
 translation: [0.0, 0.0, 0.05]   # meters: 5 cm along EE +Z
 rotation_rpy: [0.0, 0.0, 0.0]   # radians

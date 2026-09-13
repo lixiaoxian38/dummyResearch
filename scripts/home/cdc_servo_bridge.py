@@ -14,26 +14,37 @@ Usage (stop cdc_js_pub first — same /dev/ttyACM0):
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import termios
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import rclpy
 import serial
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Float64MultiArray, Int32
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory
 
-HANDEYE_FW = np.array([-8.7, 20.0, 90.0, 0.0, 60.0, 0.0])
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+from joint_limits_fw import FOLLOW_LIMITS_FW_DEG, JOINT_LIMITS_FW_DEG, SOFTWARE_MARGIN_FW_DEG
+
+HANDEYE_FW = np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
 STOW_FW = np.array([0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
 
 RAD_VOLUMN = np.array([0.0, 0.0, 1.57079, 0.0, 0.0, 0.0])
 RAD_DIRECT = np.array([1.0, 1.0, 1.0, 1.0, -1.0, -1.0])
 NAMES = [f"Joint{i}" for i in range(1, 7)]
+
+_ABS_LO = np.array([lo for lo, _ in JOINT_LIMITS_FW_DEG], dtype=float)
+_ABS_HI = np.array([hi for _, hi in JOINT_LIMITS_FW_DEG], dtype=float)
+_FOL_LO = np.array([lo for lo, _ in FOLLOW_LIMITS_FW_DEG], dtype=float)
+_FOL_HI = np.array([hi for _, hi in FOLLOW_LIMITS_FW_DEG], dtype=float)
 
 
 def fw_deg_to_ros_rad(deg: np.ndarray) -> np.ndarray:
@@ -48,9 +59,10 @@ class CdcServoBridge(Node):
     def __init__(self, port: str = "/dev/ttyACM0") -> None:
         super().__init__("cdc_servo_bridge")
         self.declare_parameter("port", port)
-        self.declare_parameter("move_speed", 12.0)  # firmware speed units; keep low
-        self.declare_parameter("max_delta_deg", 2.0)  # clamp each command vs last sent
-        self.declare_parameter("joint_soft_half_range_deg", 20.0)  # around start; leave room to leave limits
+        self.declare_parameter("move_speed", 18.0)  # firmware units; stream often, not huge hops
+        self.declare_parameter("max_delta_deg", 2.2)  # small steps at high rate = smooth
+        # 0 = no start-centered box; only hardware-15° absolute clip
+        self.declare_parameter("joint_soft_half_range_deg", 0.0)
         self.declare_parameter("enable_commands", True)
 
         port = str(self.get_parameter("port").value)
@@ -85,17 +97,27 @@ class CdcServoBridge(Node):
         self._last_cmd_t = 0.0
 
         self._goto_active = False
+        self._servo_hold = False
+        # Translation-only follow: lock J4 and J6 at start. J4 roll is a cheap
+        # but useless way for Servo to "translate" the offset camera (first
+        # LIVE wound J4 0→180° while we sent zero angular twist).
+        self._lock_roll_axes(self.deg)
         self.pub = self.create_publisher(JointState, "/joint_states", 10)
         self.create_subscription(JointTrajectory, "/servo_node/command", self.on_servo, 10)
         self.create_service(Trigger, "~/goto_handeye", self._srv_goto_handeye)
         self.create_service(Trigger, "~/goto_stow", self._srv_goto_stow)
+        self.create_service(Trigger, "~/hold_servo", self._srv_hold)
+        self.create_service(Trigger, "~/release_servo", self._srv_release)
+        self.create_subscription(Int32, "~/nudge", self.on_nudge, 10)
+        self.create_subscription(Float64MultiArray, "~/jog_fw", self.on_jog_fw, 10)
         self.create_timer(0.05, self.tick_pub)
         self.create_timer(0.2, self.tick_poll)
 
         self.get_logger().info(
             f"CDC servo bridge on {port}: speed={self.move_speed} "
-            f"max_delta={self.max_delta}deg soft_box=±{self.half_range}deg "
-            f"enable_commands={self.enable_commands} center={self.center_deg.round(1)}"
+            f"max_delta={self.max_delta}deg start_box=±{self.half_range}deg "
+            f"abs=HW-{SOFTWARE_MARGIN_FW_DEG}° enable_commands={self.enable_commands} "
+            f"center={self.center_deg.round(1)}"
         )
 
     def _send(self, cmd: str, wait: float = 0.15) -> str:
@@ -107,11 +129,13 @@ class CdcServoBridge(Node):
                     self._last_send_ok = False
                     self._fail_t = time.time()
                     return ""
-                self.ser.reset_input_buffer()
+                # Follow streams many `>j`; skip reset so we don't add a gap each tick.
+                if wait >= 0.05:
+                    self.ser.reset_input_buffer()
                 self.ser.write(cmd.encode("ascii", errors="ignore"))
                 # Do not flush()/tcdrain — that blocks ACM as "Write timeout".
                 time.sleep(wait)
-                raw = self.ser.read(400).decode(errors="replace")
+                raw = self.ser.read(400).decode(errors="replace") if wait >= 0.05 else ""
                 self._last_send_ok = True
                 return raw
             except (serial.SerialException, OSError, termios.error) as exc:
@@ -130,13 +154,14 @@ class CdcServoBridge(Node):
     def _move_j(self, deg: np.ndarray, speed: float | None = None) -> bool:
         body = ",".join(f"{d:.2f}" for d in deg.tolist())
         sp = self.move_speed if speed is None else speed
-        self._send(f">{body},{sp:.1f}", wait=0.08)
+        self._send(f">{body},{sp:.1f}", wait=0.012)
+        self._last_cmd_t = time.time()
         return self._last_send_ok
 
     def tick_poll(self) -> None:
         if self._goto_active:
             return
-        if time.time() - self._last_cmd_t < 0.15:
+        if time.time() - self._last_cmd_t < 0.45:
             return
         if not self._last_send_ok and time.time() - self._fail_t < 1.5:
             return
@@ -160,6 +185,57 @@ class CdcServoBridge(Node):
     def _srv_goto_stow(self, _req, resp):
         return self._goto_preset("stow", STOW_FW, resp)
 
+    def _srv_hold(self, _req, resp):
+        self._servo_hold = True
+        resp.success = True
+        resp.message = "servo cmds ignored"
+        return resp
+
+    def _srv_release(self, _req, resp):
+        self._servo_hold = False
+        self._lock_roll_axes(self.deg)
+        resp.success = True
+        resp.message = (
+            f"servo cmds enabled; lock J4/J6 at {self._j4_fw:.1f}/{self._j6_fw:.1f}"
+        )
+        return resp
+
+    def _lock_roll_axes(self, deg: np.ndarray) -> None:
+        self._j4_fw = float(deg[3])
+        self._j6_fw = float(deg[5])
+
+    def on_nudge(self, msg: Int32) -> None:
+        """Jog one joint by ±3° without opening a second serial writer.
+
+        data = ±1..±6 (sign is direction). Ignored during goto.
+        """
+        if self._goto_active or not self.enable_commands:
+            return
+        raw = int(msg.data)
+        if raw == 0:
+            return
+        idx = abs(raw) - 1
+        if idx < 0 or idx > 5:
+            return
+        sign = 1.0 if raw > 0 else -1.0
+        q = self.deg.copy()
+        q[idx] = float(np.clip(q[idx] + sign * 3.0, _ABS_LO[idx], _ABS_HI[idx]))
+        self.last_cmd_deg = q
+        self._move_j(q, speed=16.0)
+        self.get_logger().info(f"nudge J{idx+1} -> {q[idx]:.1f}°")
+
+    def on_jog_fw(self, msg: Float64MultiArray) -> None:
+        """Absolute FW-deg target from the slider GUI. Does not open another serial port."""
+        if self._goto_active or not self.enable_commands:
+            return
+        if len(msg.data) < 6:
+            return
+        q = np.clip(np.asarray(msg.data[:6], dtype=float), _ABS_LO, _ABS_HI)
+        self.last_cmd_deg = q
+        with self._lock:
+            self.deg = q.copy()
+        self._move_j(q, speed=18.0)
+
     def _goto_preset(self, name: str, target: np.ndarray, resp) -> Trigger.Response:
         if self._goto_active:
             resp.success = False
@@ -168,50 +244,53 @@ class CdcServoBridge(Node):
         try:
             self._goto_fw(target)
             resp.success = True
-            resp.message = f"at {name}, soft_box recentered"
+            resp.message = f"at {name}"
         except Exception as exc:
             resp.success = False
             resp.message = str(exc)
         return resp
 
     def _goto_fw(self, target: np.ndarray, steps: int = 8) -> None:
-        """Interpolate to FW deg, bypassing soft-box, then recenter the box."""
+        """One firmware target + wait. Mid-path hops / racing streams are jerky or stop short."""
+        del steps
         self._goto_active = True
+        self._servo_hold = True
         try:
-            pos = self.deg.copy()
+            target = np.clip(np.asarray(target, dtype=float), _ABS_LO, _ABS_HI)
+            got = self._get_jpos()
+            pos = np.array(got, dtype=float) if got is not None else self.last_cmd_deg.copy()
             self.get_logger().info(
-                f"goto {np.round(pos, 1)} -> {np.round(target, 1)} steps={steps}"
+                f"goto {np.round(pos, 1)} -> {np.round(target, 1)}"
             )
-            fails = 0
-            for left in range(steps, 0, -1):
-                q = pos + (target - pos) / float(left)
-                self.last_cmd_deg = q
-                if not self._move_j(q, speed=18.0):
-                    fails += 1
-                    if fails >= 2:
-                        raise RuntimeError("CDC write failed — arm did not move")
-                else:
-                    fails = 0
-                time.sleep(0.85)
+            speed = 36.0
+            err0 = float(np.max(np.abs(pos - target)))
+            if not self._move_j(target, speed=speed):
+                raise RuntimeError("CDC write failed — arm did not move")
+            time.sleep(max(err0 / speed + 1.2, 1.5))
+            got = self._get_jpos()
+            if got is not None:
+                self.deg = np.array(got, dtype=float)
+            err = float(np.max(np.abs(self.deg - target)))
+            if err > 5.0:
+                self._move_j(target, speed=speed)
+                time.sleep(max(err / speed + 0.8, 1.0))
                 got = self._get_jpos()
                 if got is not None:
                     self.deg = np.array(got, dtype=float)
-                    pos = self.deg.copy()
-            err = float(np.max(np.abs(self.deg - target)))
-            if err > 20.0:
+                err = float(np.max(np.abs(self.deg - target)))
+            if err > 10.0:
                 raise RuntimeError(
                     f"goto incomplete err={err:.1f}deg now={self.deg.round(1)}"
                 )
             self.center_deg = np.array(target, dtype=float)
             self.last_cmd_deg = self.center_deg.copy()
-            self.get_logger().info(
-                f"goto done, soft_box recentered at {self.center_deg.round(1)}"
-            )
+            self._lock_roll_axes(self.center_deg)
+            self.get_logger().info(f"goto done at {self.center_deg.round(1)} err={err:.1f}°")
         finally:
             self._goto_active = False
 
     def on_servo(self, msg: JointTrajectory) -> None:
-        if self._goto_active or not self.enable_commands:
+        if self._goto_active or self._servo_hold or not self.enable_commands:
             return
         if not msg.points:
             return
@@ -219,20 +298,49 @@ class CdcServoBridge(Node):
         if target_rad.shape[0] < 6:
             return
         target_deg = ros_rad_to_fw_deg(target_rad)
-
-        # Soft joint box around start pose
-        lo = self.center_deg - self.half_range
-        hi = self.center_deg + self.half_range
-        clipped = np.clip(target_deg, lo, hi)
-        if np.any(np.abs(clipped - target_deg) > 0.05):
-            if not hasattr(self, "_box_warn_t") or time.time() - self._box_warn_t > 2.0:
-                self._box_warn_t = time.time()
-                hit = np.where(np.abs(clipped - target_deg) > 0.05)[0] + 1
+        # Center-follow does not use roll. Leave J4/J6 at follow-start.
+        target_deg[3] = float(self._j4_fw)
+        target_deg[5] = float(self._j6_fw)
+        # Clip only the axis that hits the box; inward commands still pass.
+        fol = np.clip(target_deg, _FOL_LO, _FOL_HI)
+        if np.any(np.abs(fol - target_deg) > 0.2):
+            if not hasattr(self, "_fol_warn_t") or time.time() - self._fol_warn_t > 2.0:
+                self._fol_warn_t = time.time()
+                hit = np.where(np.abs(fol - target_deg) > 0.2)[0] + 1
                 self.get_logger().warn(
-                    f"soft_box clip J{list(hit)} at edge ±{self.half_range:.0f}° "
-                    f"center={self.center_deg.round(1)} want={target_deg.round(1)}"
+                    f"follow_box clip J{list(hit)} want={target_deg.round(1)} "
+                    f"-> {fol.round(1)} (J5 cap 75°, J1 no fake ±120 wall)"
                 )
-        target_deg = clipped
+        target_deg = fol
+
+        # Optional start-centered box (off when half_range<=0). Follow uses abs only.
+        if self.half_range > 1e-3:
+            lo = self.center_deg - self.half_range
+            hi = self.center_deg + self.half_range
+            clipped = np.clip(target_deg, lo, hi)
+            if np.any(np.abs(clipped - target_deg) > 0.05):
+                if not hasattr(self, "_box_warn_t") or time.time() - self._box_warn_t > 2.0:
+                    self._box_warn_t = time.time()
+                    hit = np.where(np.abs(clipped - target_deg) > 0.05)[0] + 1
+                    self.get_logger().warn(
+                        f"soft_box clip J{list(hit)} at edge ±{self.half_range:.0f}° "
+                        f"center={self.center_deg.round(1)} want={target_deg.round(1)}"
+                    )
+            target_deg = clipped
+
+        # Clip only the joints that hit the bumper. Holding the other axes
+        # made the arm freeze when J5 sat at 88.5° (last LIVE).
+        abs_clipped = np.clip(target_deg, _ABS_LO, _ABS_HI)
+        saturated = np.abs(abs_clipped - target_deg) > 0.05
+        if np.any(saturated):
+            if not hasattr(self, "_abs_warn_t") or time.time() - self._abs_warn_t > 2.0:
+                self._abs_warn_t = time.time()
+                hit = np.where(saturated)[0] + 1
+                self.get_logger().warn(
+                    f"abs_limit clip J{list(hit)} want={target_deg.round(1)} "
+                    f"-> {abs_clipped.round(1)}"
+                )
+        target_deg = abs_clipped
 
         # Per-command step clamp vs last command (limits jerk)
         delta = target_deg - self.last_cmd_deg
@@ -243,10 +351,13 @@ class CdcServoBridge(Node):
             target_deg = self.last_cmd_deg + delta
 
         now = time.time()
-        if now - self._last_cmd_t < 0.04:  # ~25 Hz max out
+        if now - self._last_cmd_t < 0.018:  # ~55 Hz cap; actual ~40 Hz after serial
             return
         self._last_cmd_t = now
         self.last_cmd_deg = target_deg
+        # Servo must see the pose we actually sent, or it integrates from a stale handeye.
+        with self._lock:
+            self.deg = target_deg.copy()
         if not hasattr(self, "_cmd_count"):
             self._cmd_count = 0
         self._cmd_count += 1
@@ -259,12 +370,17 @@ class CdcServoBridge(Node):
 
 def main() -> None:
     # Optional positional port only; ignore ROS remaps / --ros-args.
-    port = "/dev/ttyACM0"
+    port = os.environ.get("PORT", "")
     for a in sys.argv[1:]:
         if a.startswith("-"):
             break
         port = a
         break
+    if not port or not Path(port).exists():
+        acms = sorted(Path("/dev").glob("ttyACM*"))
+        if not acms:
+            raise SystemExit("no /dev/ttyACM* — Dummy USB CDC missing")
+        port = str(acms[-1])
     rclpy.init()
     node = CdcServoBridge(port=port)
     try:

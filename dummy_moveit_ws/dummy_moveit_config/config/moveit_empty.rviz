@@ -1,13 +1,13 @@
 Panels:
   - Class: rviz_common/Displays
-    Help Height: 78
+    Help Height: 70
     Name: Displays
     Property Tree Widget:
       Expanded:
         - /Global Options1
         - /Status1
       Splitter Ratio: 0.5
-    Tree Height: 628
+    Tree Height: 70
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -55,6 +55,56 @@ Visualization Manager:
         Show Scene Geometry: true
         Voxel Coloring: Z-Axis
         Voxel Rendering: Occupied Voxels
+      Scene Robot:
+        Attached Body Color: 150; 50; 150
+        Links:
+          All Links Enabled: true
+          Expand Joint Details: false
+          Expand Link Details: false
+          Expand Tree: false
+          Link Tree Style: Links in Alphabetic Order
+          base_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          link1_1_1:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          link2_1_1:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          link3_1_1:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          link4_1_1:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          link5_1_1:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          link6_1_1:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          world:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+        Robot Alpha: 1
+        Show Robot Collision: false
+        Show Robot Visual: true
       Value: true
   Enabled: true
   Global Options:
@@ -71,6 +121,9 @@ Visualization Manager:
     - Class: rviz_default_plugins/Measure
       Line color: 128; 128; 0
     - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -122,15 +175,16 @@ Visualization Manager:
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 857
+  Height: 671
   Hide Left Dock: false
   Hide Right Dock: true
+  QMainWindow State: 000000ff00000000fd0000000100000000000001c900000241fc0200000004fb000000100044006900730070006c006100790073010000003f000000cc000000cc00fffffffb0000001200530065006c0065006300740069006f006e01000001110000005d0000005d00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007301000001740000005d0000005d00fffffffb0000000a0056006900650077007301000001d7000000a9000000a900ffffff000001380000024100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Tool Properties:
     collapsed: false
   Views:
-    collapsed: true
-  Width: 1586
-  X: 1179
-  Y: 393
+    collapsed: false
+  Width: 775
+  X: 1048
+  Y: 81

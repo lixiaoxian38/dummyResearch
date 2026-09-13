@@ -43,5 +43,5 @@ if fuser "${PORT}" >/dev/null 2>&1; then
   exit 1
 fi
 
-python3 "${REPO_ROOT}/scripts/home/cdc_home_seven.py" --preset stow --steps 8
+python3 "${REPO_ROOT}/scripts/home/cdc_home_seven.py" --preset stow --steps 0 --speed 40
 echo "Stowed. Safe to power off the arm (e-stop still recommended until motors disable)."

@@ -76,7 +76,7 @@ python3 scripts/vision/check_calibration_ready.py   # 可选：检查 TF / 话�
 
 手动步骤：
 
-1. 回 handeye 起始位（上），再启动机械臂 TF（MoveIt / `servo_streaming` 或 `demo`），保证 `base_link`、`link6_1_1` 在 TF 树中。
+1. 回 handeye 起始位（上），再启动机械臂 TF（MoveIt / `servo_streaming` 或 `demo`），保证 `base_link`、`link5_1_1`（相机所在，J5 外壳）在 TF 树中。相机不随 J6 转，标定 `robot_effector_frame` 用 `link5_1_1`，不要用法兰 `link6_1_1`。点动只动 J1–J5。
 2. 标定板固定在桌上，相机在腕部，保证多数姿态能看见板。
 3. 启动：
 
@@ -122,13 +122,16 @@ ros2 launch dummy_vision eye_in_hand_track.launch.py \
 | 参数 | 默认 | 含义 |
 |---|---|---|
 | `dry_run` | true | 不发 `/servo_node/delta_twist_cmds` |
-| `control_frame` | optical | `optical`：把板保持在光轴/画面中心；`ee`：旧的法兰 +Z |
-| `hold_current_distance` | true | 只纠画面 XY，保持当前相机到板距离 |
-| `desired_marker_in_ee_z` | 0.25 | 仅当 `hold_current_distance:=false` 时用的目标深度 (m) |
-| `ws_around_current` | 0.08 | 期望 EE 相对当前位的软半径 (m)，避免冲向固定角落 |
-| `follow_orientation` | true | 跟随板倾斜 |
-| `max_linear_vel` | 0.08 | 线速度上限 (m/s) |
-| `max_angular_vel` | 0.4 | 角速度上限 (rad/s) |
+| `control_frame` | optical | 现阶段：`optical`＝HUD 画面中心对板心、相机距板 20 cm。`ee`＝J6 轴穿板心（光轴对齐后再用） |
+| `hold_current_distance` | false | true 时（多用于 optical）只纠 XY、锁当前深度 |
+| `desired_marker_in_ee_z` | 0.20 | 法兰平面到板的目标距离 (m)，默认 20 cm |
+| `ws_around_current` | 0.15 | 期望 EE 相对当前位的软半径 (m) |
+| `follow_orientation` | true | 法兰平面与板平行（只齐法向，不跟 ArUco yaw）。HUD LIVE 暂关，避免转 30° 丢板 |
+| `replan_period_sec` | 2.0 | 看清后再锁一个目标；到点或到期才重规划，避免每帧换路 |
+| `keep_in_view_xy` | 0.10 | 板偏出此半径则停（不反向回中） |
+| `trace_dir` | `/tmp/dummy_track_ctrl/runs` | 每次跟随一份 JSONL：目标、关节、Servo 解、轴偏差 |
+| `max_linear_vel` | 0.05 | 线速度上限 (m/s) |
+| `max_angular_vel` | 0.25 | 角速度上限 (rad/s) |
 | `ws_*` | 见节点 | 期望 EE 软工作空间 |
 
 ## 节点一览

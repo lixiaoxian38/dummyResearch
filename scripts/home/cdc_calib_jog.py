@@ -80,11 +80,11 @@ class SerialCDC:
                 cmd += "\n"
             self.ser.reset_input_buffer()
             self.ser.write(cmd.encode("ascii", errors="ignore"))
-            self.ser.flush()
+            # Do not flush()/tcdrain — wedges Dummy CDC as Write timeout.
             return self._read_for(wait)
 
     def get_jpos(self) -> list[float] | None:
-        raw = self.send("#GETJPOS", wait=0.8)
+        raw = self.send("#GETJPOS", wait=0.25)
         nums = [float(x) for x in re.findall(r"[-+]?\d*\.?\d+", raw.replace("\r", " "))]
         if len(nums) >= 6:
             return nums[:6]
@@ -107,16 +107,20 @@ class CdcCalibJog(Node):
         self.deg = np.array(pos, dtype=float)
         self.sign = 1.0
         self.pub = self.create_publisher(JointState, "/joint_states", 10)
+        self._last_poll = 0.0
         self.create_timer(0.05, self._tick)  # 20 Hz
         self.get_logger().info(
             f"CDC ready at {self.deg.round(1)} deg. Keys: 1-6 jog, R reverse, Q quit."
         )
 
     def _tick(self) -> None:
-        # Refresh from hardware occasionally for accuracy
-        got = self.cdc.get_jpos()
-        if got is not None:
-            self.deg = np.array(got, dtype=float)
+        # Do not #GETJPOS every tick — a hung ACM blocks /joint_states and splits TF.
+        now = time.time()
+        if now - self._last_poll > 0.25:
+            self._last_poll = now
+            got = self.cdc.get_jpos()
+            if got is not None:
+                self.deg = np.array(got, dtype=float)
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "base_link"

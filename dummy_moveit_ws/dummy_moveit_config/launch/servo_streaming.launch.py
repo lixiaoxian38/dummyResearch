@@ -1,5 +1,8 @@
 import os
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -47,12 +50,12 @@ def generate_launch_description():
         output="screen",
     )
 
-    # Dummy Servo Hardware Streamer
-    # This node subscribes to /servo_node/command and publishes to /joint_states
+    # Dummy Servo Hardware Streamer (Fibre). Off for CDC `/dev/ttyACM0`.
     hardware_node = Node(
         package="dummy_controller",
         executable="dummy_servo_hardware",
         output="screen",
+        condition=IfCondition(LaunchConfiguration("start_fibre_hw")),
     )
 
     # Publishes tf's for the robot
@@ -82,5 +85,16 @@ def generate_launch_description():
     )
 
     return LaunchDescription(
-        [rviz_node, static_tf, servo_node, hardware_node, robot_state_publisher]
+        [
+            DeclareLaunchArgument(
+                "start_fibre_hw",
+                default_value="false",
+                description="Start Fibre dummy_servo_hardware (conflicts with CDC bridge)",
+            ),
+            rviz_node,
+            static_tf,
+            servo_node,
+            hardware_node,
+            robot_state_publisher,
+        ]
     )

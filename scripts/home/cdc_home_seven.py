@@ -2,7 +2,8 @@
 """Initialize Dummy arm over CDC ASCII for eye-in-hand tracking / calib.
 
 Presets (FW degrees, economy-kit CDC):
-  handeye    -8.7, 20, 90, 0, 60, 0   # user-tuned EIH calib start (2026-09-06)
+  handeye    0, 0, 90, 0, 0, 0        # follow start (J1/J2=0, J3=90, J4/J5=0)
+  handeye_calib -8.7, 20, 90, 0, 60, 0  # old EIH calib pose
   lookdown   0, -48, 125, 0, -80, 0   # camera roughly toward -Z (table)
   soft7      0, -55, 150, 0, 0, 0     # side/oblique camera (legacy)
   exact7     0, -75, 180, 0, 0, 0     # REST_POSE (sits on old URDF limits)
@@ -28,7 +29,8 @@ import numpy as np
 import serial
 
 PRESETS = {
-    "handeye": np.array([-8.7, 20.0, 90.0, 0.0, 60.0, 0.0]),
+    "handeye": np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0]),
+    "handeye_calib": np.array([-8.7, 20.0, 90.0, 0.0, 60.0, 0.0]),
     "lookdown": np.array([0.0, -48.0, 125.0, 0.0, -80.0, 0.0]),
     "soft7": np.array([0.0, -55.0, 150.0, 0.0, 0.0, 0.0]),
     "exact7": np.array([0.0, -75.0, 180.0, 0.0, 0.0, 0.0]),
@@ -36,14 +38,15 @@ PRESETS = {
 }
 
 
-def send(ser: serial.Serial, cmd: str, wait: float = 0.3) -> str:
+def send(ser: serial.Serial, cmd: str, wait: float = 0.3, reset: bool = True) -> str:
     if not cmd.endswith("\n"):
         cmd += "\n"
-    ser.reset_input_buffer()
+    if reset:
+        ser.reset_input_buffer()
     ser.write(cmd.encode("ascii", errors="ignore"))
     # no flush()/tcdrain — wedges ACM as Write timeout
     time.sleep(wait)
-    return ser.read(400).decode(errors="replace")
+    return ser.read(400).decode(errors="replace") if wait >= 0.05 else ""
 
 
 def get_jpos(ser: serial.Serial) -> np.ndarray | None:
@@ -55,7 +58,7 @@ def get_jpos(ser: serial.Serial) -> np.ndarray | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="/dev/ttyACM0")
-    ap.add_argument("--speed", type=float, default=18.0)
+    ap.add_argument("--speed", type=float, default=28.0)
     ap.add_argument(
         "--preset",
         choices=sorted(PRESETS.keys()),
@@ -63,7 +66,12 @@ def main() -> int:
         help="Start pose preset (default: lookdown)",
     )
     ap.add_argument("--exact", action="store_true", help="Alias for --preset exact7")
-    ap.add_argument("--steps", type=int, default=6)
+    ap.add_argument(
+        "--steps",
+        type=int,
+        default=0,
+        help="0=continuous stream (default). >0=legacy equal-time hops (jerky).",
+    )
     args = ap.parse_args()
     target = PRESETS["exact7"] if args.exact else PRESETS[args.preset]
 
@@ -74,32 +82,46 @@ def main() -> int:
     ser.write_timeout = 0.6
     ser.dsrdtr = False
     ser.rtscts = False
-    ser.open()
-    time.sleep(0.35)
-    ser.reset_input_buffer()
+    try:
+        ser.open()
+        time.sleep(0.35)
+        ser.reset_input_buffer()
 
-    print(send(ser, "!START", 0.45).strip())
-    print(send(ser, "#CMDMODE 2", 0.35).strip())
-    pos = get_jpos(ser)
-    if pos is None:
-        print("ERROR: #GETJPOS failed", file=sys.stderr)
-        return 1
-    name = "exact7" if args.exact else args.preset
-    print("from", np.round(pos, 2), "->", target, f"({name})")
+        print(send(ser, "!START", 0.45).strip())
+        print(send(ser, "#CMDMODE 2", 0.35).strip())
+        pos = get_jpos(ser)
+        if pos is None:
+            print("ERROR: #GETJPOS failed", file=sys.stderr)
+            return 1
+        name = "exact7" if args.exact else args.preset
+        print("from", np.round(pos, 2), "->", target, f"({name})")
 
-    for i in range(1, max(args.steps, 1) + 1):
-        t = pos + (target - pos) * (i / args.steps)
-        body = ",".join(f"{d:.2f}" for d in t.tolist())
-        print(send(ser, f">{body},{args.speed:.1f}", wait=0.9).strip())
-        got = get_jpos(ser)
-        if got is not None:
-            print(" now", np.round(got, 2))
-            pos = got
-
-    final = get_jpos(ser)
-    print("done", np.round(final, 2) if final is not None else "?")
-    ser.close()
-    return 0
+        # One firmware target (smooth). N hops = 一下一下; racing a virtual
+        # stream finishes the script while the arm is still halfway.
+        body = ",".join(f"{d:.2f}" for d in target.tolist())
+        err0 = float(np.max(np.abs(pos - target)))
+        wait_s = max(err0 / max(args.speed, 8.0) + 1.2, 1.5)
+        print(send(ser, f">{body},{args.speed:.1f}", wait=0.05).strip())
+        time.sleep(wait_s)
+        final = get_jpos(ser)
+        if final is not None and float(np.max(np.abs(final - target))) > 5.0:
+            print("retry from", np.round(final, 2))
+            send(ser, f">{body},{args.speed:.1f}", wait=0.05)
+            time.sleep(max(float(np.max(np.abs(final - target))) / max(args.speed, 8.0) + 0.8, 1.0))
+            final = get_jpos(ser)
+        print("done", np.round(final, 2) if final is not None else "?")
+        return 0
+    except serial.SerialTimeoutException:
+        print(
+            "ERROR: CDC Write timeout — 串口卡死。不必重启电脑，拔插机械臂 USB 后再试。",
+            file=sys.stderr,
+        )
+        return 2
+    finally:
+        try:
+            ser.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

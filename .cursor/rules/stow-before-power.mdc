@@ -21,7 +21,7 @@ alwaysApply: true
 
 用户说启动跟随 / LIVE / 标定板跟踪时，**先回手眼起始位**再开 tracker：
 
-`[-8.7, 20, 90, 0, 60, 0]` — `scripts/home/poses/handeye_start.json`  
+`[0, 0, 90, 0, 0, 0]` — `scripts/home/poses/handeye_start.json`  
 `python3 scripts/home/cdc_home_seven.py --preset handeye`（串口需空闲）
 
 详细流程见 `.cursor/skills/dummy-arm-ops/SKILL.md`。

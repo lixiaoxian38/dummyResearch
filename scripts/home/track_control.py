@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Start / handeye / stow helpers for the tracking HUD and CLI.
 
-  python3 scripts/home/track_control.py start     # home handeye, then LIVE follow
-  python3 scripts/home/track_control.py handeye   # stop follow, go handeye
-  python3 scripts/home/track_control.py stop      # stop follow, go stow
+  python3 scripts/home/track_control.py start     # keep LIVE follow (J6 axis, 20 cm)
+  python3 scripts/home/track_control.py handeye   # cancel follow, go handeye
+  python3 scripts/home/track_control.py stop      # cancel follow, fold to stow
 """
 
 from __future__ import annotations
@@ -17,8 +17,20 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 HOME = REPO / "scripts" / "home"
 WS = REPO / "dummy_moveit_ws"
-PORT = os.environ.get("PORT", "/dev/ttyACM0")
 LOG_DIR = Path("/tmp/dummy_track_ctrl")
+
+
+def find_dummy_cdc() -> str:
+    env = os.environ.get("PORT")
+    if env and Path(env).exists():
+        return env
+    ports = sorted(Path("/dev").glob("ttyACM*"))
+    if ports:
+        return str(ports[-1])
+    raise RuntimeError("no /dev/ttyACM* — Dummy USB CDC missing")
+
+
+PORT = os.environ.get("PORT", "/dev/ttyACM0")
 
 
 def _log(msg: str) -> None:
@@ -71,11 +83,22 @@ def _pause_servo() -> None:
     subprocess.call(["bash", "-lc", cmd], env=env)
 
 
+def _bridge_trigger(srv: str, timeout_s: int = 8) -> None:
+    cmd = (
+        "source /opt/ros/jazzy/setup.bash && "
+        f"source {WS}/install/setup.bash && "
+        f"timeout {timeout_s} ros2 service call {srv} std_srvs/srv/Trigger"
+    )
+    subprocess.call(["bash", "-lc", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _stop_follow(*, kill_bridge: bool = False) -> None:
-    """Pause Servo and stop the tracker. Keep CDC bridge holding torque."""
+    """Pause Servo, stop tracker, hold CDC so residual Servo cannot yank the arm."""
     _pause_servo()
     _kill("aruco_servo_tracker")
     _kill("dummy_slider_gui.py")
+    if _bridge_alive():
+        _bridge_trigger("/cdc_servo_bridge/hold_servo")
     if kill_bridge:
         _kill("cdc_servo_bridge.py")
     time.sleep(0.4)
@@ -93,7 +116,7 @@ def _goto_via_bridge(preset: str) -> None:
     cmd = (
         "source /opt/ros/jazzy/setup.bash && "
         f"source {WS}/install/setup.bash && "
-        f"timeout 90 ros2 service call {srv} std_srvs/srv/Trigger"
+        f"timeout 120 ros2 service call {srv} std_srvs/srv/Trigger"
     )
     try:
         out = subprocess.check_output(["bash", "-lc", cmd], text=True, stderr=subprocess.STDOUT)
@@ -105,14 +128,15 @@ def _goto_via_bridge(preset: str) -> None:
 
 
 def _home_exclusive(preset: str) -> None:
-    if not Path(PORT).exists():
-        raise RuntimeError(f"{PORT} missing — plug USB / power the arm")
-    busy = subprocess.call(["fuser", PORT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    port = find_dummy_cdc()
+    busy = subprocess.call(["fuser", port], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if busy == 0:
-        raise RuntimeError(f"{PORT} busy — another process holding serial")
+        raise RuntimeError(f"{port} busy — another process holding serial")
     rc = subprocess.call(
-        [sys.executable, str(HOME / "cdc_home_seven.py"), "--preset", preset, "--steps", "8"]
+        [sys.executable, str(HOME / "cdc_home_seven.py"), "--port", port, "--preset", preset, "--steps", "0", "--speed", "40"]
     )
+    if rc == 2:
+        raise RuntimeError("CDC 串口卡死（Write timeout）。不必重启电脑：拔插机械臂 USB，再点一次。")
     if rc != 0:
         raise RuntimeError(f"home {preset} failed rc={rc}")
 
@@ -121,6 +145,7 @@ def _home(preset: str) -> None:
     if _bridge_alive():
         _goto_via_bridge(preset)
         return
+    _log("no CDC bridge — exclusive home (Servo is not the writer)")
     _home_exclusive(preset)
 
 
@@ -141,31 +166,48 @@ def _spawn(name: str, args: list[str], cwd: Path) -> None:
 
 
 def start_follow() -> None:
-    _stop_follow()
-    _home("handeye")
+    """Start / keep continuous LIVE follow from the current pose (no auto-home)."""
+    _pause_servo()
+    _kill("aruco_servo_tracker")
+    _kill("dummy_slider_gui.py")
     if not _bridge_alive():
         bash = (
             "source /opt/ros/jazzy/setup.bash && "
             f"source {WS}/install/setup.bash && "
-            f"exec python3 -u {HOME}/cdc_servo_bridge.py --ros-args "
-            "-p joint_soft_half_range_deg:=25.0"
+            f"exec python3 -u {HOME}/cdc_servo_bridge.py {find_dummy_cdc()} --ros-args "
+            "-p joint_soft_half_range_deg:=0.0"
         )
         _spawn("cdc_bridge", ["bash", "-lc", bash], REPO)
         time.sleep(1.2)
+    _bridge_trigger("/cdc_servo_bridge/release_servo")
+    # Image center on the board, camera distance 20 cm. No orientation chase.
     tr = (
         "source /opt/ros/jazzy/setup.bash && "
         f"source {WS}/install/setup.bash && "
         "exec ros2 run dummy_vision aruco_servo_tracker_node --ros-args "
         "-r __node:=aruco_servo_tracker "
         "-p dry_run:=false -p follow_orientation:=false "
-        "-p control_frame:=optical -p hold_current_distance:=true "
-        "-p desired_marker_in_ee_z:=0.25 -p ws_around_current:=0.06 "
-        "-p max_marker_z:=0.50 -p max_marker_xy:=0.18 "
-        "-p max_marker_jump:=0.12 -p lost_timeout_sec:=2.5 "
-        "-p max_linear_vel:=0.02"
+        "-p control_frame:=optical -p hold_current_distance:=false "
+        "-p desired_marker_in_ee_x:=0.0 -p desired_marker_in_ee_y:=0.0 "
+        "-p desired_marker_in_ee_z:=0.20 "
+        "-p desired_marker_rpy:=[0.0,0.0,0.0] "
+        "-p ws_around_current:=0.15 "
+        "-p max_marker_z:=0.60 -p max_marker_xy:=0.30 "
+        "-p max_marker_jump:=0.22 -p lost_timeout_sec:=2.5 "
+        "-p max_linear_vel:=0.08 -p max_angular_vel:=0.15 "
+        "-p linear_gain:=1.2 -p angular_gain:=0.4 "
+        "-p keep_in_view_xy:=0.10 -p keep_in_view_resume_xy:=0.06 "
+        "-p replan_period_sec:=4.0 -p replan_reach_m:=0.015 "
+        "-p hold_xy_m:=0.005 -p hold_z_m:=0.012 "
+        "-p hold_resume_xy_m:=0.012 -p hold_resume_z_m:=0.025 "
+        "-p center_first_xy_m:=0.035 -p replan_opt_change_m:=0.045 "
+        "-p stall_sec:=4.0 -p ws_around_current:=0.22 "
+        "-p opt_filter_alpha:=0.35 -p leave_hold_sec:=0.40 "
+        "-p center_done_xy_m:=0.018 -p replan_min_sec:=0.80 "
+        "-p trace_dir:=/tmp/dummy_track_ctrl/runs"
     )
     _spawn("tracker", ["bash", "-lc", tr], WS)
-    _log("LIVE follow started (optical, after handeye)")
+    _log("LIVE follow: image center on board, camera 20cm, latched replan")
 
 
 def go_handeye() -> None:

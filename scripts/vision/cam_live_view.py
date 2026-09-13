@@ -13,7 +13,7 @@ Usage:
   source /opt/ros/jazzy/setup.bash
   source dummy_moveit_ws/install/setup.bash
   python3 scripts/vision/cam_live_view.py
-Buttons: 开始跟随 / 回初始 / 停止收起. Keys: 1/s start, 2/h handeye, 3/x stow, q quit.
+Buttons: 开始跟随=持续跟 / 回初始=停跟回手眼 / 停止收起=停跟折叠. Keys: 1/s start, 2/h handeye, 3/x stow, q quit.
 """
 
 from __future__ import annotations
@@ -54,9 +54,9 @@ BUTTONS = (
     ("stop", "停止收起", (40, 40, 200)),
 )
 BUSY_TXT = {
-    "start": "BUSY: 停止跟随 → 回初始 → 启动跟随…",
-    "handeye": "BUSY: 停止跟随 → 回初始位置…",
-    "stop": "BUSY: 停止跟随 → 回收集位置…",
+    "start": "BUSY: 启动持续跟随（J6轴对板心，法兰20cm）…",
+    "handeye": "BUSY: 取消跟随 → 回初始位置…",
+    "stop": "BUSY: 取消跟随 → 收起到折叠位…",
 }
 CJK_FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 _FONT_CACHE: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
@@ -182,7 +182,7 @@ class CamLiveView(Node):
         self.create_timer(0.05, self._tick_ee_tf)
 
         self.get_logger().info(
-            f"Viewing {TOPIC} — 开始跟随 / 回初始 / 停止收起；q 退出"
+            f"Viewing {TOPIC} — 开始跟随=持续跟 / 回初始=停跟回手眼 / 停止收起=停跟折叠；q 退出"
         )
 
     def request_cmd(self, cmd: str) -> None:
@@ -205,31 +205,33 @@ class CamLiveView(Node):
                 out = ((proc.stdout or "") + (proc.stderr or "")).strip()
                 if proc.returncode != 0:
                     msg = out.splitlines()[-1] if out else f"{cmd} failed"
+                    if "Write timeout" in out or "串口卡死" in out:
+                        msg = "串口卡死，臂不会动。拔插机械臂USB（不必重启电脑）后再点"
                     with self._lock:
                         self._busy_msg = f"ERROR: {msg}"
                     self.get_logger().error(msg)
-                    time.sleep(5.0)
                     return
                 with self._lock:
                     if cmd == "start":
                         self._mode = "following"
-                        self._busy_msg = "跟随已启动（handeye）"
+                        self._busy_msg = "持续跟随中（J6轴→板心，法兰20cm）"
                     elif cmd == "handeye":
                         self._mode = "idle"
-                        self._busy_msg = "已回初始位置，跟随已停"
+                        self._busy_msg = "已取消跟随，回到初始位置"
                     else:
                         self._mode = "idle"
-                        self._busy_msg = "已收起，跟随已停"
+                        self._busy_msg = "已取消跟随，收到折叠位"
                 time.sleep(3.0)
+                with self._lock:
+                    if not self._busy_msg.startswith("ERROR"):
+                        self._busy_msg = ""
             except Exception as exc:
                 with self._lock:
                     self._busy_msg = f"ERROR: {exc}"
                 self.get_logger().error(str(exc))
-                time.sleep(2.5)
             finally:
                 with self._lock:
                     self._busy = False
-                    self._busy_msg = ""
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -383,11 +385,15 @@ class CamLiveView(Node):
             banner = (0, 140, 220)
 
         overlay = bgr.copy()
-        cv2.rectangle(overlay, (0, 0), (bgr.shape[1], 156), banner, -1)
+        cv2.rectangle(overlay, (0, 0), (bgr.shape[1], 184), banner, -1)
         cv2.addWeighted(overlay, 0.45, bgr, 0.55, 0, bgr)
 
         aim_txt = self._draw_aim(bgr, board_px)
-        lines = [det_txt, aim_txt]
+        lines = [
+            det_txt,
+            "target: image center on board, camera 20cm  hold |xy|<5mm (~15px) |z-20cm|<12mm",
+            aim_txt,
+        ]
         if busy_msg:
             lines.insert(0, busy_msg)
         if self._last_pose_xyz is not None and ros_seen:

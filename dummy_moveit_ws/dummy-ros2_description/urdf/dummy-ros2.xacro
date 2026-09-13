@@ -163,9 +163,10 @@
   <parent link="base_link"/>
   <child link="link1_1_1"/>
   <axis xyz="0.0 0.0 1.0"/>
-  <limit 
-    lower="-3.141593"
-    upper="3.141593"
+  <!-- URDF = hardware range. CDC bridge keeps a 1.5° bumper (joint_limits_fw.py). -->
+  <limit
+    lower="-3.14159"
+    upper="3.14159"
     effort="150"
     velocity="3.15"/>
 </joint>
@@ -176,8 +177,8 @@
   <child link="link2_1_1"/>
   <axis xyz="1.0 0.0 -0.0"/>
   <limit
-    lower="-1.308997"
-    upper="1.570796"
+    lower="-2.09440"
+    upper="1.74533"
     effort="150"
     velocity="3.15" />
 </joint>
@@ -188,8 +189,8 @@
   <child link="link3_1_1"/>
   <axis xyz="1.0 -0.0 -0.0"/>
   <limit
-    lower="-1.570796"
-    upper="1.570796"
+    lower="-2.61799"
+    upper="2.61799"
     effort="150"
     velocity="3.15" />
 </joint>
@@ -200,8 +201,8 @@
   <child link="link4_1_1"/>
   <axis xyz="0.0 -1.0 0.0"/>
   <limit
-    lower="-3.14"
-    upper="3.14"
+    lower="-3.14159"
+    upper="3.14159"
     effort="150"
     velocity="3.15" />
 </joint>
@@ -212,8 +213,8 @@
   <child link="link5_1_1"/>
   <axis xyz="-1.0 -0.0 0.0"/>
   <limit
-    lower="-1.570796"
-    upper="1.570796"
+    lower="-1.57080"
+    upper="1.57080"
     effort="150"
     velocity="3.15" />
 </joint>
@@ -224,8 +225,8 @@
   <child link="link6_1_1"/>
   <axis xyz="0.0 1.0 -0.0"/>
   <limit
-    lower="-3.14"
-    upper="3.14"
+    lower="-3.14159"
+    upper="3.14159"
     effort="150"
     velocity="3.15" />
 </joint>
