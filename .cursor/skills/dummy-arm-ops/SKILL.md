@@ -1,10 +1,10 @@
 ---
 name: dummy-arm-ops
 description: >-
-  Dummy arm home-Linux operations: CDC serial exclusivity, eye-in-hand flange
-  tracking (J6 axis through board center, flange plane 20 cm, no ArUco yaw), HUD,
-  joint soft-box, and mandatory stow before power-off or any restart that drops
-  motor torque (dry_run toggle, kill bridge, rebuild live). Use when
+  Dummy arm home-Linux operations: CDC serial exclusivity, eye-in-hand
+  tracking (optical center + 20 cm, optional orientation with J4 free / J6 locked),
+  HUD, joint soft-box, and mandatory stow before power-off or any restart that
+  drops motor torque (dry_run toggle, kill bridge, rebuild live). Use when
   starting/stopping tracking, dry_run, calibrating, jogging, shutting down, 断电,
   收工, 收起, 重启, or when the arm will not follow the board.
 ---
@@ -51,19 +51,28 @@ HUD 三个按钮（只停 tracker，**不要杀 bridge**）：
 
 | 按钮 | 行为 |
 |---|---|
-| **开始跟随** | 从当前姿态持续 LIVE 跟随 |
+| **开始跟随** | 从当前姿态持续 LIVE 跟随（会关闭六轴拖动） |
 | **回初始** | 取消跟随，完整回到 `handeye` |
 | **停止收起** | 取消跟随，收到折叠 `stow` |
+| **六轴拖动** | 暂停跟随，打开滑条（经 `/cdc_servo_bridge/jog_fw`，不占串口）；再点关闭 |
 
 回位走 `/cdc_servo_bridge/goto_handeye` 或 `goto_stow`（绕过 soft-box，走完后 hold Servo）。只有 `stow.sh` / 断电 / 滑条 GUI / `cdc_home_seven` 才停 bridge。
+
+## 桌面一键（Tracking Hub）
+
+双击桌面 **Dummy 跟随控制台**，或 `bash scripts/home/start_tracking_hub.sh`。  
+按需拉起 ROS2 + MoveIt Servo（无 Fibre）+ D415 + CDC + 检测 + HUD。**不自动 LIVE、不 git pull、不起 Stream API。** 图标丢失时：`bash scripts/home/install_desktop_launcher.sh`。
 
 ## 启动标定板跟随（必须先回 handeye）
 
 起始位（FW）：**`[0, 0, 90, 0, 0, 0]`**（`scripts/home/poses/handeye_start.json`，J5 从 0° 起，跟随中不锁）。  
 每次开 LIVE / 标定板跟踪，先独占串口回这个位，再开 bridge + tracker。
 
-现阶段跟随：**画面中心对准板心，相机到板 20 cm**（`control_frame:=optical`）。不转姿态。J6 穿轴等光轴和 −Y 对齐后再开。  
-手眼标定 `robot_effector_frame:=link5_1_1`，点动只用 J1–J5。
+现阶段跟随：**画面中心对准目标，相机到目标 20 cm**（`control_frame:=optical`）。靠近目标会把线速度按误差缩小，避免绕圈。J5 跟随下限 −85°（俯仰应由腕部承担，不要用 J1 绕圈 / J3 折肘硬顶 −70°）。  
+HUD 两个开关（**跟随中须先停再切**）：目标 `标定板 | 螺母`，运动 `只中心 | 中心+J4`（后者放开 J4、锁 J6）。默认只中心。  
+参数：`dummy_vision/config/follow_live.yaml` + HUD 写入的 `follow_session.yaml`。  
+总线：`/tracking/target_pose` + `/tracking/target_quality`。到位 HUD **SPRAY**。  
+手眼标定 `robot_effector_frame:=link5_1_1`（相机在 J5 壳体）；Servo EE 仍是 `link6_1_1`。
 
 ```bash
 # 串口空闲后
@@ -71,18 +80,17 @@ python3 scripts/home/cdc_home_seven.py --preset handeye
 python3 -u scripts/home/cdc_servo_bridge.py --ros-args -p joint_soft_half_range_deg:=0.0
 # 另开（或直接: bash scripts/home/start_board_track.sh）
 ros2 run dummy_vision aruco_servo_tracker_node --ros-args \
-  -p dry_run:=false -p follow_orientation:=false \
-  -p control_frame:=optical -p hold_current_distance:=false \
-  -p desired_marker_in_ee_z:=0.20 \
-  -p ws_around_current:=0.15 -p max_linear_vel:=0.05
+  -r __node:=aruco_servo_tracker \
+  --params-file dummy_moveit_ws/dummy_vision/config/follow_live.yaml
 python3 scripts/vision/cam_live_view.py
 ```
 
-无正式标定时距离/对中是近似的；板尽量正对法兰。软盒 clip 时先 HUD **回初始**。
+HUD 芯片：CAL=手眼TF · DET=板 · TGT=到位 · SPRAY=喷枪对准 · NUT=螺母 · MOV=运动 · RUN=跟随 · SRV=Servo。  
+绿点到 AIM ≈ 0 且 Δz≈0 即到位。`/tracking/status` 为 JSON 状态。
 
 ## 臂「看着该动却不动」
 
-跟随：只平移对中，**锁 J4 和 J6**（Servo 会把 J4 当平移捷径，第一次 LIVE 无意义地拧了近 180°）。J5 从 0° 起可动，上限 75°。到边只夹该轴；J1 不再设 ±120 假墙。J3 不低于 20°。对准 |xy|<5mm、|z-20cm|<12mm。日志：`/tmp/dummy_track_ctrl/runs/follow_*.jsonl`。
+跟随：只平移对中，**锁 J4 和 J6**（Servo 会把 J4 当平移捷径，第一次 LIVE 无意义地拧了近 180°）。J5 从 0° 起可动，−85°…75°。到边只夹该轴；J1 不再设 ±120 假墙。J3 不低于 20°。对准 |xy|<8mm、|z-20cm|<15mm。日志：`/tmp/dummy_track_ctrl/runs/follow_*.jsonl`。
 2. Servo 是否 pause / `code≠0`。
 3. tracker 是否 `BOARD LOST`（HUD 本地能看见但 ROS TF 可能丢）。
 

@@ -17,6 +17,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformListener
 from tf_transformations import quaternion_matrix, quaternion_multiply
 
@@ -91,6 +92,8 @@ class ArucoDetector(Node):
         self.pub_tool = self.create_publisher(PoseStamped, "/aruco_target_pose", 10)
         self.pub_cam = self.create_publisher(PoseStamped, "/aruco_camera_pose", 10)
         self.pub_world = self.create_publisher(PoseStamped, "/aruco_world_pose", 10)
+        self.pub_board = self.create_publisher(PoseStamped, "/tracking/board_pose", 10)
+        self.pub_board_q = self.create_publisher(Float32, "/tracking/board_quality", 10)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
 
         self.tf_buffer = Buffer()
@@ -177,6 +180,10 @@ class ArucoDetector(Node):
             pose_cam.pose.orientation.w = float(quat[3])
 
             self.pub_cam.publish(pose_cam)
+            self.pub_board.publish(pose_cam)
+            qmsg = Float32()
+            qmsg.data = self._board_quality(corners[idx], float(tvec[2]))
+            self.pub_board_q.publish(qmsg)
             self._broadcast_marker_tf(stamp, tvec, quat)
 
             if self.publish_debug:
@@ -209,6 +216,20 @@ class ArucoDetector(Node):
             if now_ns - self._last_tf_warn_ns > 2e9:
                 self._last_tf_warn_ns = now_ns
                 self.get_logger().error(f"image_callback failed: {exc}")
+
+    def _board_quality(self, corners, z: float) -> float:
+        """0–1: marker apparent size vs. pinhole expectation, plus range."""
+        if self.camera_matrix is None or z < 0.04:
+            return 0.0
+        pts = np.asarray(corners).reshape(-1, 2)
+        side = float(np.mean(np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1)))
+        fx = float(self.camera_matrix[0, 0])
+        expected = self.marker_length * fx / z
+        if expected < 1.0:
+            return 0.0
+        size_q = float(np.clip(1.0 - abs(side / expected - 1.0) / 0.45, 0.0, 1.0))
+        z_q = 1.0 if 0.08 < z < 0.55 else 0.25
+        return float(np.clip(0.6 * size_q + 0.4 * z_q, 0.0, 1.0))
 
     def _broadcast_marker_tf(self, stamp, tvec, quat):
         tf_msg = TransformStamped()

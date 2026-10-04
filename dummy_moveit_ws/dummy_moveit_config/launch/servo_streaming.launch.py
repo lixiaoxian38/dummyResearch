@@ -82,6 +82,7 @@ def generate_launch_description():
             moveit_config.robot_description,
             moveit_config.robot_description_semantic,
         ],
+        condition=IfCondition(LaunchConfiguration("start_rviz")),
     )
 
     return LaunchDescription(
@@ -90,6 +91,11 @@ def generate_launch_description():
                 "start_fibre_hw",
                 default_value="false",
                 description="Start Fibre dummy_servo_hardware (conflicts with CDC bridge)",
+            ),
+            DeclareLaunchArgument(
+                "start_rviz",
+                default_value="true",
+                description="Open RViz (Tracking Hub desktop launcher sets false)",
             ),
             rviz_node,
             static_tf,

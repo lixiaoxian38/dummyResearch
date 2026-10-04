@@ -115,33 +115,51 @@ ros2 launch dummy_vision eye_in_hand_track.launch.py \
   dry_run:=false start_servo:=true use_easy_handeye:=true
 ```
 
-安全建议：先 `follow_orientation:=false` 只跟位置；确认方向后再开姿态。手离急停近一点。
+安全建议：默认 **只跟位置**（`follow_orientation:=false`，锁 J4）。HUD 可选「中心+J4」。手离急停近一点。
 
 ## 关键参数（tracker）
 
-| 参数 | 默认 | 含义 |
+参数：[`dummy_moveit_ws/dummy_vision/config/follow_live.yaml`](../dummy_moveit_ws/dummy_vision/config/follow_live.yaml)  
+下次跟随的目标/运动模式：[`follow_session.yaml`](../dummy_moveit_ws/dummy_vision/config/follow_session.yaml)（HUD 写入）
+
+| 参数 | LIVE 默认 | 含义 |
 |---|---|---|
-| `dry_run` | true | 不发 `/servo_node/delta_twist_cmds` |
-| `control_frame` | optical | 现阶段：`optical`＝HUD 画面中心对板心、相机距板 20 cm。`ee`＝J6 轴穿板心（光轴对齐后再用） |
-| `hold_current_distance` | false | true 时（多用于 optical）只纠 XY、锁当前深度 |
-| `desired_marker_in_ee_z` | 0.20 | 法兰平面到板的目标距离 (m)，默认 20 cm |
-| `ws_around_current` | 0.15 | 期望 EE 相对当前位的软半径 (m) |
-| `follow_orientation` | true | 法兰平面与板平行（只齐法向，不跟 ArUco yaw）。HUD LIVE 暂关，避免转 30° 丢板 |
-| `replan_period_sec` | 2.0 | 看清后再锁一个目标；到点或到期才重规划，避免每帧换路 |
-| `keep_in_view_xy` | 0.10 | 板偏出此半径则停（不反向回中） |
-| `trace_dir` | `/tmp/dummy_track_ctrl/runs` | 每次跟随一份 JSONL：目标、关节、Servo 解、轴偏差 |
-| `max_linear_vel` | 0.05 | 线速度上限 (m/s) |
-| `max_angular_vel` | 0.25 | 角速度上限 (rad/s) |
-| `ws_*` | 见节点 | 期望 EE 软工作空间 |
+| `dry_run` | false（HUD start） | 不发 `/servo_node/delta_twist_cmds` |
+| `control_frame` | optical | 画面主点对目标心；`ee` 为 J6 穿轴实验模式 |
+| `follow_source` | board（可 HUD 切 nut） | mux 选标定板或螺母 |
+| `desired_marker_in_ee_z` | 0.20 | 相机到目标 20 cm |
+| `follow_orientation` | false（HUD 可开） | 跟姿态；bridge 放开 J4、锁 J6 |
+| `quality_gate` | 0.4 | 低于此当丢检，走 coast |
+| `coast_sec` | 0.4 | 丢检后速度线性衰减时间 |
+| `tcp_offset_*` | 0 | 喷枪 TCP 偏置（暂 0） |
+| `hold_xy_m` / `hold_z_m` | 5 mm / 12 mm | 到位保持滞回 |
+| `max_linear_vel` | 0.08 | 线速度上限 (m/s) |
+| `trace_dir` | `/tmp/dummy_track_ctrl/runs` | 跟随 JSONL |
+
+状态话题：`/tracking/status`（JSON：phase、quality、spray、xy/z 误差）。  
+总线：`/tracking/target_pose` + `/tracking/target_quality`（mux）；板 `/tracking/board_*`，螺母 `/tracking/nut_*`。
 
 ## 节点一览
 
 | 节点 | 作用 |
 |---|---|
-| `aruco_detector_node` | PnP + 发布 `camera_marker` TF / 位姿话题 |
-| `aruco_servo_tracker_node` | 相对位姿误差 → Servo Twist（或 dry_run） |
-| `aruco_tracker_node` | **已废弃**（旧点到点 MoveIt） |
+| `aruco_detector_node` | PnP + `camera_marker` + `/tracking/board_pose` |
+| `nut_detector_node` | 深度质心 + 六角 → `/tracking/nut_pose` + HUD 像素 |
+| `tracking_target_mux_node` | 按 `follow_source` 发 `/tracking/target_*` 与 TF `tracking_target` |
+| `aruco_servo_tracker_node` | quality/coast PBVS → Servo Twist + `/tracking/status` |
+| `cam_live_view.py` | 操作台：目标/运动开关 + 跟随三键 + 六轴拖动 + SPRAY/NUT 芯片 |
+
+## HUD 六轴拖动
+
+主窗口第四键 **六轴拖动**（或键 `4` / `j`）会：
+
+1. `track_control.py pause` — 停 tracker、hold Servo，**不杀** CDC bridge  
+2. 打开 `Dummy 六轴拖动` 滑条窗口  
+3. 滑条目标经 `/cdc_servo_bridge/jog_fw` 下发（与独立 `cdc_calib_jog.py` 同通路，不另开串口）
+
+再点一次关闭滑条；点 **开始跟随** 也会自动关掉拖动。
+| `aruco_tracker_node` | **已废弃** |
 
 ## 与 CDC 的关系
 
-真机连续跟位依赖 `dummy_servo_hardware` 发 CDC `>j…`。当前仍可能是 Fibre；**未接好前请保持 `dry_run:=true`**。
+真机 LIVE 走 `cdc_servo_bridge`（Servo → `>j…`）。断电 / 杀 bridge 前先 `bash scripts/home/stow.sh`。

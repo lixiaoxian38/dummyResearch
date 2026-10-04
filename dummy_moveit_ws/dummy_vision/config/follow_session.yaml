@@ -1,0 +1,6 @@
+# Written by cam_live_view HUD. Next 开始跟随 reads this.
+# Speeds / standoff stay in follow_live.yaml.
+/**:
+  ros__parameters:
+    follow_source: board
+    follow_orientation: false

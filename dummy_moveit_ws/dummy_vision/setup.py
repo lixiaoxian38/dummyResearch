@@ -28,6 +28,8 @@ setup(
             "aruco_tracker_node = dummy_vision.aruco_tracker_node:main",
             "aruco_servo_tracker_node = dummy_vision.aruco_servo_tracker_node:main",
             "depth_detector_node = dummy_vision.depth_detector_node:main",
+            "tracking_target_mux_node = dummy_vision.tracking_target_mux:main",
+            "nut_detector_node = dummy_vision.nut_detector_node:main",
         ],
     },
 )

@@ -1,0 +1,70 @@
+# LIVE follow parameters (single source of truth).
+# Used by: eye_in_hand_track.launch.py, scripts/home/track_control.py
+#
+# Optical: image/principal-point on target, camera-to-target 20 cm.
+# HUD session (follow_session.yaml) selects board|nut and 只中心|中心+J4.
+# EE / J6-axis mode is experimental (control_frame: ee).
+
+/**:
+  ros__parameters:
+    dry_run: false
+    follow_source: board
+    follow_orientation: false
+    control_frame: optical
+    hold_current_distance: false
+    ee_frame: link6_1_1
+    optical_frame: camera_color_optical_frame
+    marker_frame: tracking_target
+    base_frame: base_link
+
+    desired_marker_in_ee_x: 0.0
+    desired_marker_in_ee_y: 0.0
+    desired_marker_in_ee_z: 0.20
+    tcp_offset_x: 0.0
+    tcp_offset_y: 0.0
+    tcp_offset_z: 0.0
+    # Marker axes aligned with optical when facing the camera (rpy in optical).
+    # When follow_orientation, tracker snapshots current relative rot at start (0°).
+    desired_marker_rpy: [0.0, 0.0, 0.0]
+    quality_gate: 0.4
+    coast_sec: 0.4
+    nut_diameter_m: 0.025
+    nut_diameter_min_m: 0.018
+    nut_diameter_max_m: 0.035
+
+    ws_around_current: 0.22
+    max_marker_z: 0.60
+    max_marker_xy: 0.30
+    max_marker_jump: 0.22
+    lost_timeout_sec: 2.5
+
+    max_linear_vel: 0.055
+    max_angular_vel: 0.20
+    linear_gain: 0.85
+    angular_gain: 0.35
+    near_err_m: 0.05
+    near_gain_min: 0.18
+
+    keep_in_view_xy: 0.10
+    keep_in_view_resume_xy: 0.06
+    replan_period_sec: 4.0
+    replan_reach_m: 0.015
+    hold_xy_m: 0.008
+    hold_z_m: 0.015
+    hold_resume_xy_m: 0.018
+    hold_resume_z_m: 0.030
+    center_first_xy_m: 0.035
+    replan_opt_change_m: 0.045
+    stall_sec: 4.0
+    opt_filter_alpha: 0.35
+    leave_hold_sec: 0.60
+    center_done_xy_m: 0.018
+    replan_min_sec: 0.80
+    trace_dir: /tmp/dummy_track_ctrl/runs
+
+    ws_x_min: -0.50
+    ws_x_max: 0.50
+    ws_y_min: -0.60
+    ws_y_max: 0.20
+    ws_z_min: 0.05
+    ws_z_max: 0.45

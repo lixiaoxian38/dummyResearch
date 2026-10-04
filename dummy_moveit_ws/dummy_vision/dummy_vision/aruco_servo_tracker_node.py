@@ -8,6 +8,7 @@ publishes /tracking/desired_ee_pose and TF desired_ee — no motion commands.
 
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
@@ -20,6 +21,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Float32, String
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory
@@ -78,11 +80,17 @@ class ArucoServoTracker(Node):
 
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("ee_frame", "link6_1_1")
-        self.declare_parameter("marker_frame", "camera_marker")
+        self.declare_parameter("marker_frame", "tracking_target")
         self.declare_parameter("twist_topic", "/servo_node/delta_twist_cmds")
         self.declare_parameter("control_rate_hz", 50.0)
         self.declare_parameter("dry_run", True)
         self.declare_parameter("follow_orientation", True)
+        self.declare_parameter("follow_source", "board")
+        self.declare_parameter("quality_gate", 0.4)
+        self.declare_parameter("coast_sec", 0.4)
+        self.declare_parameter("tcp_offset_x", 0.0)
+        self.declare_parameter("tcp_offset_y", 0.0)
+        self.declare_parameter("tcp_offset_z", 0.0)
         # ee: flange (link6) aims at board; optical: keep board on camera axis.
         self.declare_parameter("control_frame", "ee")
         self.declare_parameter("optical_frame", "camera_color_optical_frame")
@@ -101,7 +109,10 @@ class ArucoServoTracker(Node):
         self.declare_parameter("linear_gain", 1.0)
         self.declare_parameter("angular_gain", 1.0)
         self.declare_parameter("max_linear_vel", 0.05)
+        # Shrink Cartesian step as |p_err| → 0 so Servo does not orbit the aim.
         self.declare_parameter("max_angular_vel", 0.25)
+        self.declare_parameter("near_err_m", 0.05)
+        self.declare_parameter("near_gain_min", 0.18)
         self.declare_parameter("pos_deadband", 0.0025)
         self.declare_parameter("ori_deadband", 0.02)
         self.declare_parameter("lost_timeout_sec", 1.0)
@@ -152,6 +163,9 @@ class ArucoServoTracker(Node):
         rate_hz = float(self.get_parameter("control_rate_hz").value)
         self.dry_run = bool(self.get_parameter("dry_run").value)
         self.follow_orientation = bool(self.get_parameter("follow_orientation").value)
+        self.follow_source = str(self.get_parameter("follow_source").value)
+        self.quality_gate = float(self.get_parameter("quality_gate").value)
+        self.coast_sec = float(self.get_parameter("coast_sec").value)
 
         dx = float(self.get_parameter("desired_marker_in_ee_x").value)
         dy = float(self.get_parameter("desired_marker_in_ee_y").value)
@@ -182,9 +196,22 @@ class ArucoServoTracker(Node):
             depth=1,
         )
         self.pub_desired = self.create_publisher(PoseStamped, "/tracking/desired_ee_pose", 10)
+        self.pub_status = self.create_publisher(String, "/tracking/status", 10)
         self.pub_twist = self.create_publisher(TwistStamped, twist_topic, twist_qos)
         self.create_subscription(JointState, "/joint_states", self._on_joints, 10)
         self.create_subscription(JointTrajectory, "/servo_node/command", self._on_servo, 10)
+        self.create_subscription(PoseStamped, "/tracking/target_pose", self._on_target_pose, 10)
+        self.create_subscription(Float32, "/tracking/target_quality", self._on_target_quality, 10)
+        self._tgt_pose: PoseStamped | None = None
+        self._tgt_quality = 0.0
+        self._tgt_recv_t = 0.0
+        self._R_om_zero: np.ndarray | None = None
+        self._coast_t0 = 0.0
+        self._coast_v: np.ndarray | None = None
+        self._coast_w: np.ndarray | None = None
+        self._last_cmd_v = np.zeros(3)
+        self._last_cmd_w = np.zeros(3)
+        self._coasting = False
 
         self._last_marker_ok = False
         self._last_opt_xyz: np.ndarray | None = None
@@ -202,6 +229,7 @@ class ArucoServoTracker(Node):
         self._opt_filt: np.ndarray | None = None
         self._des_filt: np.ndarray | None = None
         self._v_filt: np.ndarray | None = None
+        self._w_filt: np.ndarray | None = None
         self._leave_hold_t = 0.0
         self._reject_n = 0
         self._joints_fw: list[float] | None = None
@@ -229,9 +257,10 @@ class ArucoServoTracker(Node):
         mode = "DRY_RUN" if self.dry_run else "LIVE"
         self.get_logger().info(
             f"Aruco servo tracker [{mode}] control={self.control_frame} "
-            f"ee={self.ee_frame} optical={self.optical_frame} marker={self.marker_frame} "
-            f"desired=[{dx:.3f},{dy:.3f},{dz:.3f}] hold_z={self.hold_current_distance} "
-            f"follow_ori={self.follow_orientation}"
+            f"src={self.follow_source} ee={self.ee_frame} optical={self.optical_frame} "
+            f"marker={self.marker_frame} desired=[{dx:.3f},{dy:.3f},{dz:.3f}] "
+            f"hold_z={self.hold_current_distance} follow_ori={self.follow_orientation} "
+            f"q_gate={self.quality_gate:.2f} coast={self.coast_sec:.2f}s"
         )
         if self.dry_run:
             self.get_logger().info(
@@ -294,6 +323,109 @@ class ArucoServoTracker(Node):
         if msg.points and len(msg.points[0].positions) >= 6:
             self._servo_fw = ros_rad_to_fw_deg(msg.points[0].positions[:6])
 
+    def _on_target_pose(self, msg: PoseStamped) -> None:
+        self._tgt_pose = msg
+        self._tgt_recv_t = self.get_clock().now().nanoseconds / 1e9
+
+    def _on_target_quality(self, msg: Float32) -> None:
+        self._tgt_quality = float(msg.data)
+
+    def _pose_to_matrix(self, pose: PoseStamped) -> np.ndarray:
+        p = pose.pose.position
+        q = pose.pose.orientation
+        mat = tf_transformations.quaternion_matrix([q.x, q.y, q.z, q.w])
+        mat[0, 3] = p.x
+        mat[1, 3] = p.y
+        mat[2, 3] = p.z
+        return mat
+
+    def _target_in_optical(self, now_s: float) -> tuple[np.ndarray | None, float]:
+        age = now_s - self._tgt_recv_t
+        if self._tgt_pose is not None and age <= self.lost_timeout:
+            fid = self._tgt_pose.header.frame_id or self.optical_frame
+            if fid and fid != self.optical_frame:
+                now_ns = self.get_clock().now().nanoseconds
+                if now_ns - self._last_warn_ns > 2e9:
+                    self._last_warn_ns = now_ns
+                    self.get_logger().warn(
+                        f"target_pose frame {fid} != {self.optical_frame}"
+                    )
+            return self._pose_to_matrix(self._tgt_pose), float(self._tgt_quality)
+        try:
+            tf_om = self.tf_buffer.lookup_transform(
+                self.optical_frame, self.marker_frame, rclpy.time.Time()
+            )
+            marker_age = (
+                self.get_clock().now() - rclpy.time.Time.from_msg(tf_om.header.stamp)
+            ).nanoseconds / 1e9
+            if marker_age > self.lost_timeout:
+                return None, 0.0
+            return tf_to_matrix(tf_om), 1.0
+        except Exception:
+            return None, 0.0
+
+    def _coast_or_stop(self, stamp, now_s: float, quality: float) -> None:
+        if self._last_marker_ok:
+            self.get_logger().warn(
+                f"TARGET LOST src={self.follow_source} q={quality:.2f} — coast {self.coast_sec:.2f}s"
+            )
+            self._coast_t0 = now_s
+            self._coast_v = self._last_cmd_v.copy()
+            self._coast_w = self._last_cmd_w.copy()
+            self._trace.write_event("target_lost", quality=quality, src=self.follow_source)
+        self._last_marker_ok = False
+        elapsed = now_s - self._coast_t0 if self._coast_t0 else 1e9
+        if (
+            self.coast_sec > 1e-4
+            and elapsed < self.coast_sec
+            and self._coast_v is not None
+            and self._coast_w is not None
+        ):
+            scale = max(0.0, 1.0 - elapsed / self.coast_sec)
+            v = self._coast_v * scale
+            w = self._coast_w * scale
+            self._coasting = True
+            self._view_mode = "coast"
+            self._publish_status(
+                board_ok=False,
+                moving=float(np.linalg.norm(v)) > 1e-4,
+                err_m=0.0,
+                vel_mps=float(np.linalg.norm(v)),
+                opt=None,
+                phase="coast",
+                quality=quality,
+                coasting=True,
+            )
+            if self.dry_run:
+                return
+            twist = TwistStamped()
+            twist.header.stamp = stamp
+            twist.header.frame_id = self.base_frame
+            twist.twist.linear.x = float(v[0])
+            twist.twist.linear.y = float(v[1])
+            twist.twist.linear.z = float(v[2])
+            twist.twist.angular.x = float(w[0])
+            twist.twist.angular.y = float(w[1])
+            twist.twist.angular.z = float(w[2])
+            self.pub_twist.publish(twist)
+            return
+        self._coasting = False
+        self._last_moving = False
+        self._hold_z = None
+        self._last_opt_xyz = None
+        self._clear_latch("stale")
+        self._publish_zero_twist(stamp)
+        self._publish_status(
+            board_ok=False,
+            moving=False,
+            err_m=0.0,
+            vel_mps=0.0,
+            opt=None,
+            phase="lost",
+            quality=quality,
+            coasting=False,
+        )
+
     def _clear_latch(self, why: str) -> None:
         if self._latch_T is not None:
             self._trace.write_event("latch_clear", reason=why)
@@ -310,22 +442,22 @@ class ArucoServoTracker(Node):
             self._opt_filt = None
             self._des_filt = None
             self._v_filt = None
+            self._w_filt = None
             self._leave_hold_t = 0.0
 
     def control_tick(self):
         stamp = self.get_clock().now().to_msg()
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        self.follow_source = str(self.get_parameter("follow_source").value)
+        self.follow_orientation = bool(self.get_parameter("follow_orientation").value)
+        self.quality_gate = float(self.get_parameter("quality_gate").value)
+        self.coast_sec = float(self.get_parameter("coast_sec").value)
         try:
-            # Lookup each hop at its own "latest" time, then compose.
-            # A single lookup(base→marker, Time()) often fails when marker TF is
-            # briefly older than the joint TF buffer (extrapolation into the past).
             tf_base_ee = self.tf_buffer.lookup_transform(
                 self.base_frame, self.ee_frame, rclpy.time.Time()
             )
             tf_base_optical = self.tf_buffer.lookup_transform(
                 self.base_frame, self.optical_frame, rclpy.time.Time()
-            )
-            tf_optical_marker = self.tf_buffer.lookup_transform(
-                self.optical_frame, self.marker_frame, rclpy.time.Time()
             )
             tf_ee_optical = self.tf_buffer.lookup_transform(
                 self.ee_frame, self.optical_frame, rclpy.time.Time()
@@ -339,24 +471,18 @@ class ArucoServoTracker(Node):
             self._last_marker_ok = False
             return
 
-        # Stale marker TF → stop
-        marker_age = (
-            self.get_clock().now()
-            - rclpy.time.Time.from_msg(tf_optical_marker.header.stamp)
-        ).nanoseconds / 1e9
-        if marker_age > self.lost_timeout:
-            self._publish_zero_twist(stamp)
-            if self._last_marker_ok:
-                self.get_logger().warn(f"Marker TF stale ({marker_age:.2f}s); stopping")
-            if self._last_marker_ok:
-                self.get_logger().warn("BOARD LOST — holding")
-            self._last_marker_ok = False
-            self._last_moving = False
-            self._hold_z = None
-            self._last_opt_xyz = None
-            self._clear_latch("stale")
+        T_optical_marker, quality = self._target_in_optical(now_s)
+        lost = T_optical_marker is None or quality < self.quality_gate
+        if lost:
+            self._coast_or_stop(stamp, now_s, quality)
             return
-        T_optical_marker = tf_to_matrix(tf_optical_marker)
+        self._coasting = False
+        self._coast_v = None
+        self._coast_w = None
+
+        T_base_ee = tf_to_matrix(tf_base_ee)
+        T_base_optical = tf_to_matrix(tf_base_optical)
+        T_ee_optical = tf_to_matrix(tf_ee_optical)
         mx, my, mz = (float(T_optical_marker[i, 3]) for i in range(3))
         opt_xyz = np.array([mx, my, mz], dtype=float)
         max_z = float(self.get_parameter("max_marker_z").value)
@@ -371,38 +497,44 @@ class ArucoServoTracker(Node):
             self._reject_n += 1
             if self._reject_n < 5:
                 return
-            self._publish_zero_twist(stamp)
+            self._coast_or_stop(stamp, now_s, 0.0)
             if self._last_marker_ok:
                 self.get_logger().warn(
-                    f"REJECT marker opt=[{mx:.3f},{my:.3f},{mz:.3f}] — hold"
+                    f"REJECT target opt=[{mx:.3f},{my:.3f},{mz:.3f}] — hold"
                 )
-            self._last_marker_ok = False
-            self._last_moving = False
-            self._clear_latch("reject")
             return
+
+        if self.follow_orientation and self._R_om_zero is None:
+            self._R_om_zero = T_optical_marker[:3, :3].copy()
+            self.get_logger().info("orientation zero captured at follow start")
 
         if not self._last_marker_ok:
             self.get_logger().info(
-                f"BOARD DETECTED — tracking opt=[{mx:.3f},{my:.3f},{mz:.3f}]"
+                f"TARGET DETECTED src={self.follow_source} "
+                f"q={quality:.2f} opt=[{mx:.3f},{my:.3f},{mz:.3f}]"
             )
-            self._trace.write_event("board_detected", opt=[mx, my, mz])
+            self._trace.write_event(
+                "target_detected", opt=[mx, my, mz], quality=quality, src=self.follow_source
+            )
         self._last_marker_ok = True
         self._last_opt_xyz = opt_xyz
         self._reject_n = 0
 
-        T_base_ee = tf_to_matrix(tf_base_ee)
-        T_base_optical = tf_to_matrix(tf_base_optical)
-        T_ee_optical = tf_to_matrix(tf_ee_optical)
-        T_optical_ee = tf_transformations.inverse_matrix(T_ee_optical)
         T_base_marker = T_base_optical @ T_optical_marker
 
-        now_s = self.get_clock().now().nanoseconds / 1e9
         p_now = T_base_ee[:3, 3]
         xy_now = math.hypot(mx, my)
 
         if self.control_frame == "optical":
             T_des_raw, T_base_ee_des = self._plan_optical(
-                mx, my, mz, T_base_ee, T_base_optical, now_s
+                mx,
+                my,
+                mz,
+                T_base_ee,
+                T_base_optical,
+                T_optical_marker,
+                T_ee_optical,
+                now_s,
             )
         else:
             # J6 axis (link6 ±Y) through board center; flange plane ⟂ axis at standoff.
@@ -456,7 +588,12 @@ class ArucoServoTracker(Node):
 
         v = self.linear_gain * p_err
         w = self.angular_gain * w_err if self.follow_orientation else np.zeros(3)
+        err_pre = float(np.linalg.norm(p_err))
+        near_m = max(1e-4, float(self.get_parameter("near_err_m").value))
+        near_min = float(np.clip(self.get_parameter("near_gain_min").value, 0.05, 1.0))
+        v = v * float(np.clip(err_pre / near_m, near_min, 1.0))
 
+        # Position hold zeros linear only — orientation can keep tracking (e.g. nut spin).
         if np.linalg.norm(p_err) < self.pos_db or self._view_mode.endswith("hold"):
             v[:] = 0.0
             self._v_filt = np.zeros(3)
@@ -469,11 +606,22 @@ class ArucoServoTracker(Node):
             self._v_filt = 0.65 * self._v_filt + 0.35 * v
         v = self._v_filt
 
-        v = self._clamp_vec(v, self.max_lin)
-        w = self._clamp_vec(w, self.max_ang)
+        if self.follow_orientation:
+            if self._w_filt is None:
+                self._w_filt = w.copy()
+            else:
+                self._w_filt = 0.70 * self._w_filt + 0.30 * w
+            w = self._w_filt
+        else:
+            self._w_filt = None
+
+        v = self._clamp_vec(v, self.max_lin) * float(quality)
+        w = self._clamp_vec(w, self.max_ang) * float(quality)
+        self._last_cmd_v = np.asarray(v, dtype=float)
+        self._last_cmd_w = np.asarray(w, dtype=float)
 
         err_norm = float(np.linalg.norm(p_err))
-        moving = float(np.linalg.norm(v)) > 1e-3
+        moving = float(np.linalg.norm(v)) > 1e-3 or float(np.linalg.norm(w)) > 1e-3
         now_ns = self.get_clock().now().nanoseconds
         if moving != self._last_moving or now_ns - self._last_status_ns > 2e9:
             self._last_status_ns = now_ns
@@ -495,6 +643,16 @@ class ArucoServoTracker(Node):
         p_m = T_base_marker[:3, 3]
         axis_along = float(np.dot(p_m - p_now, -y_hat))
         axis_miss = float(np.linalg.norm(np.cross(p_m - p_now, y_hat)))
+        self._publish_status(
+            board_ok=True,
+            moving=moving,
+            err_m=err_norm,
+            vel_mps=float(np.linalg.norm(v)),
+            opt=(mx, my, mz),
+            phase=self._phase or self._view_mode,
+            quality=float(quality),
+            coasting=False,
+        )
         self._trace.maybe_sample(
             {
                 "mode": self._view_mode,
@@ -561,22 +719,65 @@ class ArucoServoTracker(Node):
         )
 
     def _optical_slide(self, mx: float, my: float, mz: float, *, xy_only: bool) -> np.ndarray:
-        dx = float(self.get_parameter("desired_marker_in_ee_x").value)
-        dy = float(self.get_parameter("desired_marker_in_ee_y").value)
+        dx = float(self.get_parameter("desired_marker_in_ee_x").value) + float(
+            self.get_parameter("tcp_offset_x").value
+        )
+        dy = float(self.get_parameter("desired_marker_in_ee_y").value) + float(
+            self.get_parameter("tcp_offset_y").value
+        )
         if xy_only or bool(self.get_parameter("hold_current_distance").value):
             if bool(self.get_parameter("hold_current_distance").value) and self._hold_z is None:
                 self._hold_z = mz
-            slide = np.array([mx - dx, my - dy, 0.0], dtype=float)
-            n = float(np.linalg.norm(slide))
-            if n > 0.04:
-                slide *= 0.04 / n
-            return slide
+            return np.array([mx - dx, my - dy, 0.0], dtype=float)
         dz = float(self.get_parameter("desired_marker_in_ee_z").value)
-        slide = np.array([mx - dx, my - dy, mz - dz], dtype=float)
-        n = float(np.linalg.norm(slide))
-        if n > 0.04:
-            slide *= 0.04 / n
-        return slide
+        return np.array([mx - dx, my - dy, mz - dz], dtype=float)
+
+    def _desired_optical_marker_matrix(self, mz: float, *, xy_only: bool) -> np.ndarray:
+        """Desired marker pose in the optical frame (PBVS setpoint)."""
+        dx = float(self.get_parameter("desired_marker_in_ee_x").value) + float(
+            self.get_parameter("tcp_offset_x").value
+        )
+        dy = float(self.get_parameter("desired_marker_in_ee_y").value) + float(
+            self.get_parameter("tcp_offset_y").value
+        )
+        if xy_only or bool(self.get_parameter("hold_current_distance").value):
+            if bool(self.get_parameter("hold_current_distance").value) and self._hold_z is None:
+                self._hold_z = mz
+            dz = float(self._hold_z if self._hold_z is not None else mz)
+        else:
+            dz = float(self.get_parameter("desired_marker_in_ee_z").value) + float(
+                self.get_parameter("tcp_offset_z").value
+            )
+        T = np.eye(4)
+        if self.follow_orientation and self._R_om_zero is not None:
+            T[:3, :3] = self._R_om_zero
+        else:
+            rpy = list(self.get_parameter("desired_marker_rpy").value)
+            T = tf_transformations.euler_matrix(float(rpy[0]), float(rpy[1]), float(rpy[2]))
+        T[0, 3] = dx
+        T[1, 3] = dy
+        T[2, 3] = dz
+        return T
+
+    def _pbvs_ee_pose(
+        self,
+        T_base_optical: np.ndarray,
+        T_optical_marker: np.ndarray,
+        T_ee_optical: np.ndarray,
+        T_base_ee: np.ndarray,
+        mz: float,
+        *,
+        xy_only: bool,
+    ) -> np.ndarray:
+        """Absolute EE pose that places the marker at the optical setpoint."""
+        T_om_des = self._desired_optical_marker_matrix(mz, xy_only=xy_only)
+        T_base_marker = T_base_optical @ T_optical_marker
+        T_base_optical_des = T_base_marker @ tf_transformations.inverse_matrix(T_om_des)
+        T_optical_ee = tf_transformations.inverse_matrix(T_ee_optical)
+        T_ee_des = T_base_optical_des @ T_optical_ee
+        if not self.follow_orientation:
+            T_ee_des[:3, :3] = T_base_ee[:3, :3]
+        return T_ee_des
 
     def _plan_optical(
         self,
@@ -585,15 +786,24 @@ class ArucoServoTracker(Node):
         mz: float,
         T_base_ee: np.ndarray,
         T_base_optical: np.ndarray,
+        T_optical_marker: np.ndarray,
+        T_ee_optical: np.ndarray,
         now_s: float,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Continuous optical servo: every tick slide toward image-center + 20 cm.
+        """Continuous optical servo: center + standoff; optional orientation → J4.
 
         Do not lock a Cartesian waypoint. Latch/replan was the start-stop jerk.
+        When follow_orientation, hold keeps position but still tracks marker roll.
         """
-        dx = float(self.get_parameter("desired_marker_in_ee_x").value)
-        dy = float(self.get_parameter("desired_marker_in_ee_y").value)
-        dz = float(self.get_parameter("desired_marker_in_ee_z").value)
+        dx = float(self.get_parameter("desired_marker_in_ee_x").value) + float(
+            self.get_parameter("tcp_offset_x").value
+        )
+        dy = float(self.get_parameter("desired_marker_in_ee_y").value) + float(
+            self.get_parameter("tcp_offset_y").value
+        )
+        dz = float(self.get_parameter("desired_marker_in_ee_z").value) + float(
+            self.get_parameter("tcp_offset_z").value
+        )
         hold_xy = float(self.get_parameter("hold_xy_m").value)
         hold_z = float(self.get_parameter("hold_z_m").value)
         resume_xy = float(self.get_parameter("hold_resume_xy_m").value)
@@ -615,6 +825,21 @@ class ArucoServoTracker(Node):
         on_target = xy_now <= hold_xy and z_err <= hold_z
         p_now = T_base_ee[:3, 3]
 
+        def _with_ori(T_pos: np.ndarray, *, xy_only: bool) -> np.ndarray:
+            if not self.follow_orientation:
+                return T_pos
+            T_ori = self._pbvs_ee_pose(
+                T_base_optical,
+                T_optical_marker,
+                T_ee_optical,
+                T_base_ee,
+                mz,
+                xy_only=xy_only,
+            )
+            out = T_pos.copy()
+            out[:3, :3] = T_ori[:3, :3]
+            return out
+
         if self._phase == "hold":
             leaving = xy_now > resume_xy or z_err > resume_z
             if leaving:
@@ -622,7 +847,8 @@ class ArucoServoTracker(Node):
                     self._leave_hold_t = now_s
                 if (now_s - self._leave_hold_t) < leave_hold:
                     self._view_mode = "ON_TARGET hold"
-                    return T_base_ee.copy(), T_base_ee.copy()
+                    T_h = _with_ori(T_base_ee.copy(), xy_only=False)
+                    return T_h, T_h
                 self._phase = "approach" if xy_now <= resume_xy else "center"
                 self._leave_hold_t = 0.0
                 self._des_filt = None
@@ -630,19 +856,22 @@ class ArucoServoTracker(Node):
             else:
                 self._leave_hold_t = 0.0
                 self._view_mode = "ON_TARGET hold"
-                return T_base_ee.copy(), T_base_ee.copy()
+                T_h = _with_ori(T_base_ee.copy(), xy_only=False)
+                return T_h, T_h
 
         if on_target:
             if self._phase != "hold":
                 self._trace.write_event("on_target", opt=[mx, my, mz], ee=p_now.tolist())
                 self.get_logger().info(
                     f"ON TARGET — hold xy={xy_now*100:.1f}cm z={mz*100:.1f}cm"
+                    + (" (ori tracking)" if self.follow_orientation else "")
                 )
             self._phase = "hold"
             self._leave_hold_t = 0.0
             self._des_filt = p_now.copy()
             self._view_mode = "ON_TARGET hold"
-            return T_base_ee.copy(), T_base_ee.copy()
+            T_h = _with_ori(T_base_ee.copy(), xy_only=False)
+            return T_h, T_h
 
         if self._phase == "center":
             xy_only = xy_now > center_done
@@ -652,8 +881,7 @@ class ArucoServoTracker(Node):
         slide_opt = self._optical_slide(mx, my, mz, xy_only=xy_only)
         T_inst = T_base_ee.copy()
         T_inst[:3, 3] = T_base_ee[:3, 3] + T_base_optical[:3, :3] @ slide_opt
-        if not self.follow_orientation:
-            T_inst[:3, :3] = T_base_ee[:3, :3]
+        T_inst = _with_ori(T_inst, xy_only=xy_only)
         T_raw = T_inst.copy()
         T_inst = self._clip_desired(T_inst, T_base_ee)
         p_des = T_inst[:3, 3]
@@ -663,6 +891,8 @@ class ArucoServoTracker(Node):
             self._des_filt = 0.72 * self._des_filt + 0.28 * p_des
         T_smooth = T_base_ee.copy()
         T_smooth[:3, 3] = self._des_filt
+        if self.follow_orientation:
+            T_smooth[:3, :3] = T_inst[:3, :3]
         self._latch_T = T_smooth
         self._view_mode = f"track {self._phase}"
         return T_raw, T_smooth
@@ -720,6 +950,53 @@ class ArucoServoTracker(Node):
             hi = float(self.get_parameter(f"ws_{axis}_max").value)
             out[i, 3] = float(np.clip(out[i, 3], lo, hi))
         return out
+
+    def _publish_status(
+        self,
+        *,
+        board_ok: bool,
+        moving: bool,
+        err_m: float,
+        vel_mps: float,
+        opt: tuple[float, float, float] | None,
+        phase: str,
+        quality: float = 0.0,
+        coasting: bool = False,
+    ) -> None:
+        dz = float(self.get_parameter("desired_marker_in_ee_z").value)
+        ox = oy = oz = None
+        z_err = None
+        xy_cm = None
+        if opt is not None:
+            ox, oy, oz = (float(opt[0]), float(opt[1]), float(opt[2]))
+            xy_cm = math.hypot(ox, oy) * 100.0
+            z_err = (oz - dz) * 100.0
+        payload = {
+            "control_frame": self.control_frame,
+            "dry_run": bool(self.dry_run),
+            "follow_orientation": bool(self.follow_orientation),
+            "follow_source": self.follow_source,
+            "standoff_m": dz,
+            "board_ok": board_ok,
+            "target_ok": board_ok,
+            "quality": float(quality),
+            "coasting": bool(coasting),
+            "spray": bool(phase == "hold"),
+            "moving": moving,
+            "phase": phase,
+            "view": self._view_mode,
+            "err_cm": err_m * 100.0,
+            "vel_cm_s": vel_mps * 100.0,
+            "opt_x_cm": None if ox is None else ox * 100.0,
+            "opt_y_cm": None if oy is None else oy * 100.0,
+            "opt_z_cm": None if oz is None else oz * 100.0,
+            "xy_cm": xy_cm,
+            "z_err_cm": z_err,
+            "on_target": bool(phase == "hold"),
+        }
+        msg = String()
+        msg.data = json.dumps(payload, separators=(",", ":"))
+        self.pub_status.publish(msg)
 
     def _broadcast_desired_tf(self, pose: PoseStamped):
         tf_msg = TransformStamped()

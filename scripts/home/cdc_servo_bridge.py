@@ -64,12 +64,18 @@ class CdcServoBridge(Node):
         # 0 = no start-centered box; only hardware-15° absolute clip
         self.declare_parameter("joint_soft_half_range_deg", 0.0)
         self.declare_parameter("enable_commands", True)
+        # Translation-only follow used to freeze both; orientation follow needs J4.
+        # J6 stays locked by default so flange spin does not stack with wrist roll.
+        self.declare_parameter("lock_j4", True)
+        self.declare_parameter("lock_j6", True)
 
         port = str(self.get_parameter("port").value)
         self.move_speed = float(self.get_parameter("move_speed").value)
         self.max_delta = float(self.get_parameter("max_delta_deg").value)
         self.half_range = float(self.get_parameter("joint_soft_half_range_deg").value)
         self.enable_commands = bool(self.get_parameter("enable_commands").value)
+        self.lock_j4 = bool(self.get_parameter("lock_j4").value)
+        self.lock_j6 = bool(self.get_parameter("lock_j6").value)
 
         self._lock = threading.Lock()
         port = str(self.get_parameter("port").value)
@@ -98,9 +104,12 @@ class CdcServoBridge(Node):
 
         self._goto_active = False
         self._servo_hold = False
-        # Translation-only follow: lock J4 and J6 at start. J4 roll is a cheap
-        # but useless way for Servo to "translate" the offset camera (first
-        # LIVE wound J4 0→180° while we sent zero angular twist).
+        self._running = True
+        self._pending_move: np.ndarray | None = None
+        self._want_jpos = False
+        self._cmd_count = 0
+        self._last_sent_deg = np.full(6, np.nan)
+        # Snapshot roll axes for optional freeze (see lock_j4 / lock_j6).
         self._lock_roll_axes(self.deg)
         self.pub = self.create_publisher(JointState, "/joint_states", 10)
         self.create_subscription(JointTrajectory, "/servo_node/command", self.on_servo, 10)
@@ -111,16 +120,22 @@ class CdcServoBridge(Node):
         self.create_subscription(Int32, "~/nudge", self.on_nudge, 10)
         self.create_subscription(Float64MultiArray, "~/jog_fw", self.on_jog_fw, 10)
         self.create_timer(0.05, self.tick_pub)
-        self.create_timer(0.2, self.tick_poll)
+        self.create_timer(0.25, self.tick_poll)
+        self._writer = threading.Thread(target=self._serial_loop, daemon=True, name="cdc-write")
+        self._writer.start()
+        # One hold of the pose we just read — firmware drops torque if stream stops.
+        self._queue_move(self.deg)
 
         self.get_logger().info(
             f"CDC servo bridge on {port}: speed={self.move_speed} "
             f"max_delta={self.max_delta}deg start_box=±{self.half_range}deg "
             f"abs=HW-{SOFTWARE_MARGIN_FW_DEG}° enable_commands={self.enable_commands} "
+            f"lock_j4={self.lock_j4} lock_j6={self.lock_j6} "
             f"center={self.center_deg.round(1)}"
         )
 
     def _send(self, cmd: str, wait: float = 0.15) -> str:
+        """Serial I/O. Stream writes use wait=0 (no sleep). Never call from ROS callbacks."""
         with self._lock:
             if not cmd.endswith("\n"):
                 cmd += "\n"
@@ -129,12 +144,11 @@ class CdcServoBridge(Node):
                     self._last_send_ok = False
                     self._fail_t = time.time()
                     return ""
-                # Follow streams many `>j`; skip reset so we don't add a gap each tick.
                 if wait >= 0.05:
                     self.ser.reset_input_buffer()
                 self.ser.write(cmd.encode("ascii", errors="ignore"))
-                # Do not flush()/tcdrain — that blocks ACM as "Write timeout".
-                time.sleep(wait)
+                if wait > 1e-4:
+                    time.sleep(wait)
                 raw = self.ser.read(400).decode(errors="replace") if wait >= 0.05 else ""
                 self._last_send_ok = True
                 return raw
@@ -142,7 +156,57 @@ class CdcServoBridge(Node):
                 self._last_send_ok = False
                 self._fail_t = time.time()
                 self.get_logger().error(f"CDC serial error: {exc}")
+                time.sleep(0.25)
                 return ""
+
+    def _queue_move(self, deg: np.ndarray) -> None:
+        with self._lock:
+            self._pending_move = np.asarray(deg, dtype=float).copy()
+
+    def _serial_loop(self) -> None:
+        """Single writer: latest setpoint wins; skip no-change; cap ~25 Hz."""
+        min_dt = 0.04
+        eps = 0.08
+        while self._running:
+            if self._goto_active:
+                time.sleep(0.02)
+                continue
+            with self._lock:
+                pending = self._pending_move
+                self._pending_move = None
+                want_jpos = self._want_jpos
+                self._want_jpos = False
+            if pending is not None:
+                if np.isfinite(self._last_sent_deg).all():
+                    delta = float(np.max(np.abs(pending - self._last_sent_deg)))
+                else:
+                    delta = 1e9
+                if delta < eps:
+                    with self._lock:
+                        self.deg = pending.copy()
+                    time.sleep(0.015)
+                    continue
+                wait = min_dt - (time.time() - self._last_cmd_t)
+                if wait > 0:
+                    time.sleep(wait)
+                ok = self._move_j(pending)
+                if ok:
+                    self._last_sent_deg = pending.copy()
+                    self.last_cmd_deg = pending.copy()
+                    with self._lock:
+                        self.deg = pending.copy()
+                    self._cmd_count += 1
+                    if self._cmd_count <= 3 or self._cmd_count % 50 == 0:
+                        self.get_logger().info(
+                            f"CDC cmd#{self._cmd_count} deg={np.round(pending, 1)}"
+                        )
+                continue
+            if want_jpos and (time.time() - self._last_cmd_t) > 0.45:
+                got = self._get_jpos()
+                if got is not None:
+                    with self._lock:
+                        self.deg = np.array(got, dtype=float)
+            time.sleep(0.02)
 
     def _get_jpos(self) -> list[float] | None:
         raw = self._send("#GETJPOS", wait=0.12)
@@ -154,7 +218,7 @@ class CdcServoBridge(Node):
     def _move_j(self, deg: np.ndarray, speed: float | None = None) -> bool:
         body = ",".join(f"{d:.2f}" for d in deg.tolist())
         sp = self.move_speed if speed is None else speed
-        self._send(f">{body},{sp:.1f}", wait=0.012)
+        self._send(f">{body},{sp:.1f}", wait=0.0)
         self._last_cmd_t = time.time()
         return self._last_send_ok
 
@@ -165,10 +229,8 @@ class CdcServoBridge(Node):
             return
         if not self._last_send_ok and time.time() - self._fail_t < 1.5:
             return
-        got = self._get_jpos()
-        if got is not None:
-            with self._lock:
-                self.deg = np.array(got, dtype=float)
+        with self._lock:
+            self._want_jpos = True
 
     def tick_pub(self) -> None:
         with self._lock:
@@ -193,16 +255,26 @@ class CdcServoBridge(Node):
 
     def _srv_release(self, _req, resp):
         self._servo_hold = False
+        self.lock_j4 = bool(self.get_parameter("lock_j4").value)
+        self.lock_j6 = bool(self.get_parameter("lock_j6").value)
         self._lock_roll_axes(self.deg)
+        parts = []
+        if self.lock_j4:
+            parts.append(f"J4@{self._j4_fw:.1f}")
+        if self.lock_j6:
+            parts.append(f"J6@{self._j6_fw:.1f}")
+        freeze = ",".join(parts) if parts else "none"
         resp.success = True
-        resp.message = (
-            f"servo cmds enabled; lock J4/J6 at {self._j4_fw:.1f}/{self._j6_fw:.1f}"
-        )
+        resp.message = f"servo cmds enabled; freeze={freeze}"
         return resp
 
     def _lock_roll_axes(self, deg: np.ndarray) -> None:
         self._j4_fw = float(deg[3])
         self._j6_fw = float(deg[5])
+
+    def _refresh_lock_flags(self) -> None:
+        self.lock_j4 = bool(self.get_parameter("lock_j4").value)
+        self.lock_j6 = bool(self.get_parameter("lock_j6").value)
 
     def on_nudge(self, msg: Int32) -> None:
         """Jog one joint by ±3° without opening a second serial writer.
@@ -220,21 +292,19 @@ class CdcServoBridge(Node):
         sign = 1.0 if raw > 0 else -1.0
         q = self.deg.copy()
         q[idx] = float(np.clip(q[idx] + sign * 3.0, _ABS_LO[idx], _ABS_HI[idx]))
-        self.last_cmd_deg = q
-        self._move_j(q, speed=16.0)
+        self._servo_hold = True
+        self._queue_move(q)
         self.get_logger().info(f"nudge J{idx+1} -> {q[idx]:.1f}°")
 
     def on_jog_fw(self, msg: Float64MultiArray) -> None:
-        """Absolute FW-deg target from the slider GUI. Does not open another serial port."""
+        """Absolute FW-deg from HUD sliders. Preempts Servo so streams cannot pile up."""
         if self._goto_active or not self.enable_commands:
             return
         if len(msg.data) < 6:
             return
+        self._servo_hold = True
         q = np.clip(np.asarray(msg.data[:6], dtype=float), _ABS_LO, _ABS_HI)
-        self.last_cmd_deg = q
-        with self._lock:
-            self.deg = q.copy()
-        self._move_j(q, speed=18.0)
+        self._queue_move(q)
 
     def _goto_preset(self, name: str, target: np.ndarray, resp) -> Trigger.Response:
         if self._goto_active:
@@ -298,9 +368,16 @@ class CdcServoBridge(Node):
         if target_rad.shape[0] < 6:
             return
         target_deg = ros_rad_to_fw_deg(target_rad)
-        # Center-follow does not use roll. Leave J4/J6 at follow-start.
-        target_deg[3] = float(self._j4_fw)
-        target_deg[5] = float(self._j6_fw)
+        self._refresh_lock_flags()
+        # Optionally freeze wrist/flange roll (translation-only follow).
+        if self.lock_j4:
+            target_deg[3] = float(self._j4_fw)
+        else:
+            self._j4_fw = float(target_deg[3])
+        if self.lock_j6:
+            target_deg[5] = float(self._j6_fw)
+        else:
+            self._j6_fw = float(target_deg[5])
         # Clip only the axis that hits the box; inward commands still pass.
         fol = np.clip(target_deg, _FOL_LO, _FOL_HI)
         if np.any(np.abs(fol - target_deg) > 0.2):
@@ -309,7 +386,7 @@ class CdcServoBridge(Node):
                 hit = np.where(np.abs(fol - target_deg) > 0.2)[0] + 1
                 self.get_logger().warn(
                     f"follow_box clip J{list(hit)} want={target_deg.round(1)} "
-                    f"-> {fol.round(1)} (J5 cap 75°, J1 no fake ±120 wall)"
+                    f"-> {fol.round(1)} (J5 −85…75°, J1 no fake ±120 wall)"
                 )
         target_deg = fol
 
@@ -350,22 +427,10 @@ class CdcServoBridge(Node):
             delta = np.clip(delta, -max_d, max_d)
             target_deg = self.last_cmd_deg + delta
 
-        now = time.time()
-        if now - self._last_cmd_t < 0.018:  # ~55 Hz cap; actual ~40 Hz after serial
-            return
-        self._last_cmd_t = now
         self.last_cmd_deg = target_deg
-        # Servo must see the pose we actually sent, or it integrates from a stale handeye.
         with self._lock:
             self.deg = target_deg.copy()
-        if not hasattr(self, "_cmd_count"):
-            self._cmd_count = 0
-        self._cmd_count += 1
-        if self._cmd_count <= 3 or self._cmd_count % 50 == 0:
-            self.get_logger().info(
-                f"CDC cmd#{self._cmd_count} deg={np.round(target_deg, 1)}"
-            )
-        self._move_j(target_deg)
+        self._queue_move(target_deg)
 
 
 def main() -> None:
@@ -388,6 +453,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        node._running = False
         try:
             node._send("!DISABLE", wait=0.3)
         except Exception:

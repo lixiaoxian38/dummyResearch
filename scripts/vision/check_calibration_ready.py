@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 
 FRAMES = [
-    ("base_link", "link6_1_1"),
-    ("link6_1_1", "camera_link"),
+    ("base_link", "link5_1_1"),
+    ("link5_1_1", "camera_link"),  # hand-eye (camera on J5 housing)
     ("camera_link", "camera_color_optical_frame"),
+    ("base_link", "link6_1_1"),  # Servo EE / flange
     ("camera_color_optical_frame", "camera_marker"),
 ]
 
@@ -24,6 +26,7 @@ TOPICS = [
     "/camera/camera/color/image_raw",
     "/camera/camera/color/camera_info",
     "/joint_states",
+    "/tracking/status",
 ]
 
 
@@ -63,31 +66,31 @@ def main() -> int:
         code, _ = run(["ros2", "pkg", "prefix", pkg])
         print(f"  [{'OK' if code == 0 else 'MISSING'}] {pkg}")
 
-    print("\nTopics (need arm + camera + optional marker while board visible):")
+    print("\nTopics:")
     topic_ok = all(check_topic(t) for t in TOPICS[:2])
     for t in TOPICS[2:]:
         check_topic(t)
 
-    print("\nTF chain (marker needs board in view during tracking):")
+    print("\nTF chain (camera on link5; flange=link6):")
     tf_ok = True
-    for p, c in FRAMES[:3]:
+    for p, c in FRAMES[:4]:
         if not check_tf(p, c):
             tf_ok = False
     print("  [optional while board visible]")
-    check_tf(*FRAMES[3])
+    check_tf(*FRAMES[4])
 
-    calib = run(["bash", "-lc", "ls ~/.ros2/easy_handeye2/calibrations/dummy_eih_calib.calib 2>/dev/null"])
-    has_calib = calib[0] == 0
-    print(f"\nSaved calib dummy_eih_calib: {'YES' if has_calib else 'NO'}")
+    calib = Path.home() / ".ros2/easy_handeye2/calibrations/dummy_eih_calib.calib"
+    print(f"\nSaved calib dummy_eih_calib: {'YES' if calib.is_file() else 'NO'} ({calib})")
 
     print("\n--- Summary ---")
     if not topic_ok:
         print("Start RealSense: ros2 launch realsense2_camera rs_launch.py")
     if not tf_ok:
-        print("Start arm TF: ros2 launch dummy_moveit_config servo_streaming.launch.py")
-        print("Hand-eye: ros2 launch dummy_vision eye_in_hand_publish.launch.py")
+        print("Start arm TF + handeye:")
+        print("  ros2 launch dummy_moveit_config servo_streaming.launch.py")
+        print("  ros2 launch dummy_vision eye_in_hand_publish.launch.py use_easy_handeye:=true")
     if topic_ok and tf_ok:
-        print("Ready for calibration or dry_run tracking.")
+        print("Ready. LIVE: bash scripts/home/start_board_track.sh + cam_live_view.py")
     return 0 if topic_ok else 1
 
 

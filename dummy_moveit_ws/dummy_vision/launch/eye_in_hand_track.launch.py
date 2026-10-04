@@ -47,8 +47,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "use_easy_handeye",
-            default_value="false",
-            description="Use saved easy_handeye2 calib instead of static YAML",
+            default_value="true",
+            description="Publish saved easy_handeye2 calib (link5→camera)",
         ),
         DeclareLaunchArgument(
             "follow_orientation",
@@ -130,51 +130,48 @@ def generate_launch_description():
         )
     )
 
+    follow_yaml = os.path.join(
+        get_package_share_directory("dummy_vision"), "config", "follow_live.yaml"
+    )
+    session_yaml = os.path.join(
+        get_package_share_directory("dummy_vision"), "config", "follow_session.yaml"
+    )
+    tracker_params = [follow_yaml]
+    if os.path.isfile(session_yaml):
+        tracker_params.append(session_yaml)
+
+    actions.append(
+        Node(
+            package="dummy_vision",
+            executable="tracking_target_mux_node",
+            name="tracking_target_mux",
+            output="screen",
+            parameters=tracker_params,
+        )
+    )
+    actions.append(
+        Node(
+            package="dummy_vision",
+            executable="nut_detector_node",
+            name="nut_detector",
+            output="screen",
+            parameters=tracker_params,
+        )
+    )
+
     actions.append(
         Node(
             package="dummy_vision",
             executable="aruco_servo_tracker_node",
             name="aruco_servo_tracker",
             output="screen",
-            parameters=[
+            parameters=tracker_params
+            + [
                 {
                     "dry_run": ParameterValue(dry_run, value_type=bool),
-                    "follow_orientation": ParameterValue(follow_orientation, value_type=bool),
-                    # Image center on the board; camera-to-board 20 cm.
-                    "control_frame": "optical",
-                    "hold_current_distance": False,
-                    "desired_marker_in_ee_x": 0.0,
-                    "desired_marker_in_ee_y": 0.0,
-                    "desired_marker_in_ee_z": 0.20,
-                    "ws_around_current": 0.22,
-                    "max_marker_z": 0.60,
-                    "max_marker_xy": 0.30,
-                    "max_marker_jump": 0.22,
-                    "ws_x_min": -0.50,
-                    "ws_x_max": 0.50,
-                    "ws_y_min": -0.60,
-                    "ws_y_max": 0.20,
-                    "ws_z_min": 0.05,
-                    "ws_z_max": 0.45,
-                    "max_linear_vel": 0.08,
-                    "max_angular_vel": 0.25,
-                    "linear_gain": 1.2,
-                    "keep_in_view_xy": 0.10,
-                    "keep_in_view_resume_xy": 0.06,
-                    "replan_period_sec": 4.0,
-                    "replan_reach_m": 0.015,
-                    "hold_xy_m": 0.005,
-                    "hold_z_m": 0.012,
-                    "hold_resume_xy_m": 0.012,
-                    "hold_resume_z_m": 0.025,
-                    "center_first_xy_m": 0.035,
-                    "replan_opt_change_m": 0.045,
-                    "stall_sec": 4.0,
-                    "opt_filter_alpha": 0.35,
-                    "leave_hold_sec": 0.40,
-                    "center_done_xy_m": 0.018,
-                    "replan_min_sec": 0.80,
-                    "trace_dir": "/tmp/dummy_track_ctrl/runs",
+                    "follow_orientation": ParameterValue(
+                        follow_orientation, value_type=bool
+                    ),
                 }
             ],
         )

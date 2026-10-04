@@ -31,6 +31,8 @@ bash scripts/home/go.sh
 
 | 命令 | 作用 |
 |---|---|
+| `bash scripts/home/start_tracking_hub.sh` | **跟随控制台**：按需起 ROS Servo + 相机 + CDC + HUD（桌面可双击） |
+| `bash scripts/home/install_desktop_launcher.sh` | 把「Dummy 跟随控制台」放到桌面和应用菜单 |
 | `bash scripts/home/go.sh` | pull + 编译 + 启动（推荐） |
 | `bash scripts/home/start.sh` | 只启动服务 |
 | `bash scripts/home/stow.sh` | **断电前收起**到「7」字 `[0,-75,180,0,0,0]` |
