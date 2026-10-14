@@ -8,7 +8,7 @@ Usage:
   source /opt/ros/jazzy/setup.bash && source dummy_moveit_ws/install/setup.bash
   python3 scripts/vision/cam_live_view.py
 Buttons: 开始跟随 / 回初始 / 停止收起 / 六轴拖动
-Toggles (idle): 标定板|螺母 × 只中心|中心+J4 — 跟随中须先停再切
+Toggles (idle): 标定板|螺母 — 跟随中须先停再切；运动走 WDLS（J4 自由 / J6 锁）
 Keys: 1/s start, 2/h handeye, 3/x stow, 4/j jog, q quit
 """
 
@@ -71,7 +71,7 @@ BUTTONS = (
     ("jog", "六轴拖动", (160, 90, 40)),
 )
 BUSY_TXT = {
-    "start": "BUSY: 启动跟随（画面中心对目标 · 相机20cm）…",
+    "start": "BUSY: 启动跟随（若折叠会先回初始 · 光心对准·20cm）…",
     "handeye": "BUSY: 取消跟随 → 回初始位置…",
     "stop": "BUSY: 取消跟随 → 收起到折叠位…",
     "jog": "BUSY: 暂停跟随 → 打开六轴拖动…",
@@ -174,7 +174,6 @@ class CamLiveView(Node):
         self._toggle_rects: list[tuple[str, tuple[int, int, int, int]]] = []
         sess = load_follow_session()
         self._follow_source = str(sess["follow_source"])
-        self._follow_ori = bool(sess["follow_orientation"])
         self._nut_px = None
         self._nut_q = 0.0
         self._nut_t = 0.0
@@ -234,11 +233,11 @@ class CamLiveView(Node):
         self.create_timer(0.08, self._tick_jog_send)
 
         self.get_logger().info(
-            "跟随控制台：板/螺母 × 中心/J4（停跟后切换）+ 跟随三键 + 六轴拖动；q 退出"
+            "跟随控制台：板/螺母（停跟后切换）+ WDLS 跟随三键 + 六轴拖动；q 退出"
         )
 
     def request_cmd(self, cmd: str) -> None:
-        if cmd.startswith("src_") or cmd.startswith("mot_"):
+        if cmd.startswith("src_"):
             self._request_toggle(cmd)
             return
         if cmd == "jog":
@@ -277,7 +276,7 @@ class CamLiveView(Node):
                     if cmd == "start":
                         self._mode = "following"
                         self._busy_msg = (
-                            f"持续跟随中（{self._src_label()} · {self._mot_label()} · 20cm）"
+                            f"跟随中（{self._src_label()}）· AIM对准绿点且 SPRAY亮=到位"
                         )
                     elif cmd == "handeye":
                         self._mode = "idle"
@@ -305,9 +304,6 @@ class CamLiveView(Node):
     def _src_label(self) -> str:
         return "螺母" if self._follow_source == "nut" else "标定板"
 
-    def _mot_label(self) -> str:
-        return "中心+J4" if self._follow_ori else "只中心"
-
     def _request_toggle(self, cmd: str) -> None:
         with self._lock:
             mode = self._mode
@@ -315,19 +311,13 @@ class CamLiveView(Node):
         if busy:
             return
         src = self._follow_source
-        ori = self._follow_ori
         if cmd == "src_board":
             src = "board"
         elif cmd == "src_nut":
             src = "nut"
-        elif cmd == "mot_center":
-            ori = False
-        elif cmd == "mot_j4":
-            ori = True
         else:
             return
-        unchanged = src == self._follow_source and ori == self._follow_ori
-        if unchanged:
+        if src == self._follow_source:
             if mode == "following":
                 with self._lock:
                     self._busy_msg = (
@@ -335,22 +325,18 @@ class CamLiveView(Node):
                     )
             return
         self._follow_source = src
-        self._follow_ori = ori
-        save_follow_session(
-            follow_source=self._follow_source,
-            follow_orientation=self._follow_ori,
-        )
+        save_follow_session(follow_source=self._follow_source)
         if mode == "following":
             with self._lock:
                 self._busy_msg = (
-                    f"已记下 {self._src_label()} · {self._mot_label()}。"
+                    f"已记下 {self._src_label()}。"
                     "先点「停止跟随」，再点「开始跟随」才会换"
                 )
         else:
             with self._lock:
-                self._busy_msg = f"下次跟随：{self._src_label()} · {self._mot_label()}"
+                self._busy_msg = f"下次跟随：{self._src_label()}（WDLS）"
         self.get_logger().info(
-            f"HUD session src={self._follow_source} ori={self._follow_ori} live={mode}"
+            f"HUD session src={self._follow_source} live={mode}"
         )
 
     def _request_jog(self) -> None:
@@ -660,8 +646,10 @@ class CamLiveView(Node):
         ros_seen = (now - self._last_pose_t) < 1.0
         des_ok = (now - self._last_des_t) < 1.0
         twist_fresh = (now - self._last_twist_t) < 0.5
-        moving = twist_fresh and self._last_twist_norm > 1e-3
         st = self._status if (now - self._status_t) < 1.5 else {}
+        moving = bool(st.get("moving")) or (
+            twist_fresh and self._last_twist_norm > 1e-3
+        )
 
         if ros_seen:
             banner = (36, 120, 48)
@@ -783,24 +771,22 @@ class CamLiveView(Node):
             busy = self._busy
         locked = busy
         y0, y1 = 118, 144
-        pairs = (
-            (("src_board", "标定板", self._follow_source == "board"), ("src_nut", "螺母", self._follow_source == "nut")),
-            (("mot_center", "只中心", not self._follow_ori), ("mot_j4", "中心+J4", self._follow_ori)),
+        pair = (
+            ("src_board", "标定板", self._follow_source == "board"),
+            ("src_nut", "螺母", self._follow_source == "nut"),
         )
         rects: list[tuple[str, tuple[int, int, int, int]]] = []
         x = 12
-        for a, b in pairs:
-            for cmd, label, on in (a, b):
-                x1 = x + 72
-                fill = (70, 70, 70) if locked else ((40, 130, 80) if on else (50, 50, 55))
-                if self._hit == cmd and not locked:
-                    fill = tuple(min(255, c + 35) for c in fill)
-                cv2.rectangle(bgr, (x, y0), (x1, y1), fill, -1)
-                cv2.rectangle(bgr, (x, y0), (x1, y1), (200, 200, 200), 1)
-                _put_zh_center(bgr, label, (x, y0, x1, y1), (255, 255, 255), size=13)
-                rects.append((cmd, (x, y0, x1, y1)))
-                x = x1 + 4
-            x += 16
+        for cmd, label, on in pair:
+            x1 = x + 72
+            fill = (70, 70, 70) if locked else ((40, 130, 80) if on else (50, 50, 55))
+            if self._hit == cmd and not locked:
+                fill = tuple(min(255, c + 35) for c in fill)
+            cv2.rectangle(bgr, (x, y0), (x1, y1), fill, -1)
+            cv2.rectangle(bgr, (x, y0), (x1, y1), (200, 200, 200), 1)
+            _put_zh_center(bgr, label, (x, y0, x1, y1), (255, 255, 255), size=13)
+            rects.append((cmd, (x, y0, x1, y1)))
+            x = x1 + 4
         self._toggle_rects = rects
 
     def _draw_buttons(self, bgr: np.ndarray) -> None:

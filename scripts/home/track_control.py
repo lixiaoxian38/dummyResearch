@@ -31,37 +31,37 @@ sys.path.insert(0, str(HOME))
 from follow_session import load as load_follow_session  # noqa: E402
 
 
-def _follow_orientation_enabled() -> bool:
-    return bool(load_follow_session()["follow_orientation"])
-
-
 def _follow_source() -> str:
     return str(load_follow_session()["follow_source"])
 
 
 def _bridge_ros_args() -> str:
-    """CDC locks: J4 free when following orientation; J6 stays frozen."""
-    if _follow_orientation_enabled():
-        locks = "-p lock_j4:=false -p lock_j6:=true"
-    else:
-        locks = "-p lock_j4:=true -p lock_j6:=true"
-    return f"-p joint_soft_half_range_deg:=0.0 {locks}"
+    """CDC locks for WDLS Follow: J4 free (posture), J6 locked (CDC Quiet)."""
+    return "-p joint_soft_half_range_deg:=0.0 -p lock_j4:=false -p lock_j6:=true"
 
 
 def _apply_bridge_locks() -> None:
     """Push lock flags to a running bridge (ros2 param set)."""
     if not _bridge_alive():
         return
-    lock_j4 = "false" if _follow_orientation_enabled() else "true"
     env = os.environ.copy()
-    for name, val in (("lock_j4", lock_j4), ("lock_j6", "true")):
+    for name, val in (("lock_j4", "false"), ("lock_j6", "true")):
         cmd = (
             "source /opt/ros/jazzy/setup.bash && "
             f"source {WS}/install/setup.bash && "
-            f"timeout 5 ros2 param set /cdc_servo_bridge {name} {val}"
+            f"timeout -k 1 4 ros2 param set /cdc_servo_bridge {name} {val}"
         )
-        subprocess.call(["bash", "-lc", cmd], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    _log(f"bridge locks: lock_j4={lock_j4} lock_j6=true")
+        try:
+            subprocess.call(
+                ["bash", "-lc", cmd],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=6,
+            )
+        except subprocess.TimeoutExpired:
+            _log(f"WARN: param set {name} timed out")
+    _log("bridge locks: lock_j4=false lock_j6=true (WDLS Follow)")
 
 
 def find_dummy_cdc() -> str:
@@ -157,7 +157,8 @@ def _bridge_trigger(srv: str, timeout_s: int = 8) -> bool:
 
 
 def _stop_follow(*, kill_bridge: bool = False) -> None:
-    """Pause Servo, stop tracker, hold CDC so residual Servo cannot yank the arm."""
+    """Pause Servo, stop Follow motion nodes, hold CDC so residual Servo cannot yank the arm."""
+    _kill("wdls_follow_resolver")
     _kill("aruco_servo_tracker")
     _kill("dummy_slider_gui.py")
     _pause_servo()
@@ -353,8 +354,52 @@ def pause_follow() -> None:
     _log("follow paused — arm held; bridge ready for /cdc_servo_bridge/jog_fw")
 
 
+def _fw_from_joint_states(timeout_s: float = 5.0) -> list[float] | None:
+    """Read one /joint_states and convert to FW degrees. None if unavailable."""
+    import math
+    import re
+
+    cmd = (
+        "source /opt/ros/jazzy/setup.bash && "
+        f"source {WS}/install/setup.bash && "
+        f"timeout -k 1 {max(2, int(timeout_s))} ros2 topic echo /joint_states --once"
+    )
+    try:
+        out = subprocess.check_output(
+            ["bash", "-lc", cmd], text=True, stderr=subprocess.STDOUT, timeout=timeout_s + 5
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    # Parse "position:\\n- 0.1\\n- ..." (YAML-ish from ros2 topic echo).
+    m = re.search(r"position:\s*\n((?:\s*-\s*[-\d.eE+]+\s*\n)+)", out)
+    if not m:
+        return None
+    rad = [float(x) for x in re.findall(r"-\s*([-\d.eE+]+)", m.group(1))]
+    if len(rad) < 6:
+        return None
+    rad_volumn = [0.0, 0.0, 1.57079, 0.0, 0.0, 0.0]
+    rad_direct = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
+    fw = [
+        math.degrees((rad[i] + rad_volumn[i]) * rad_direct[i]) for i in range(6)
+    ]
+    return fw
+
+
+def _near_handeye(tol_deg: float = 20.0) -> bool:
+    """True if current FW pose is close to handeye start [0,0,90,0,0,0]."""
+    fw = _fw_from_joint_states()
+    if fw is None:
+        _log("WARN: could not read /joint_states — will go handeye before follow")
+        return False
+    target = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
+    err = max(abs(a - b) for a, b in zip(fw, target))
+    _log(f"pose vs handeye max|Δ|={err:.1f}° now={[round(x,1) for x in fw]} (tol {tol_deg:.0f}°)")
+    return err <= tol_deg
+
+
 def start_follow() -> None:
-    """Start / keep continuous LIVE follow from the current pose (no auto-home)."""
+    """Start LIVE Follow via WDLS. Auto-homes to handeye if still folded/far."""
+    _kill("wdls_follow_resolver")
     _kill("aruco_servo_tracker")
     _kill("dummy_slider_gui.py")
     handeye_src = _ensure_handeye_tf()
@@ -369,6 +414,13 @@ def start_follow() -> None:
         time.sleep(1.2)
     else:
         _apply_bridge_locks()
+
+    # Folded / far poses cannot Spray-Aim (camera points wrong). Go handeye first.
+    if not _near_handeye(tol_deg=20.0):
+        _log("not near handeye — going handeye before LIVE follow")
+        _home("handeye")
+        time.sleep(0.3)
+
     if not _bridge_trigger("/cdc_servo_bridge/release_servo", timeout_s=10):
         time.sleep(0.4)
         if not _bridge_trigger("/cdc_servo_bridge/release_servo", timeout_s=10):
@@ -381,19 +433,18 @@ def start_follow() -> None:
     src = _follow_source()
     _set_mux_source(src)
 
-    ori = "ori+J4" if _follow_orientation_enabled() else "pos-only"
     tr = (
         "source /opt/ros/jazzy/setup.bash && "
         f"source {WS}/install/setup.bash && "
-        "exec ros2 run dummy_vision aruco_servo_tracker_node --ros-args "
-        "-r __node:=aruco_servo_tracker "
+        "exec ros2 run dummy_vision wdls_follow_resolver_node --ros-args "
+        "-r __node:=wdls_follow_resolver "
         f"{_params_files()}"
     )
-    _spawn("tracker", ["bash", "-lc", tr], WS)
+    _spawn("wdls_resolver", ["bash", "-lc", tr], WS)
     _unpause_servo()
     _log(
-        f"LIVE follow: optical 20cm | src={src} | {ori} | "
-        f"handeye={handeye_src} | params={FOLLOW_YAML.name}+session"
+        f"LIVE follow: WDLS resolver | optical 20cm | src={src} | "
+        f"J4 free / J6 lock | handeye={handeye_src} | params={FOLLOW_YAML.name}+session"
     )
 
 

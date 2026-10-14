@@ -96,7 +96,7 @@ fi
 if ! _running "cdc_servo_bridge.py"; then
   say "启动 CDC bridge（力矩保持）…"
   _bg cdc_bridge \
-    "source '${SCRIPT_DIR}/env.sh' && cd '${REPO_ROOT}' && exec python3 -u scripts/home/cdc_servo_bridge.py /dev/ttyACM0 --ros-args -p joint_soft_half_range_deg:=0.0 -p lock_j4:=true -p lock_j6:=true"
+    "source '${SCRIPT_DIR}/env.sh' && cd '${REPO_ROOT}' && exec python3 -u scripts/home/cdc_servo_bridge.py /dev/ttyACM0 --ros-args -p joint_soft_half_range_deg:=0.0 -p lock_j4:=false -p lock_j6:=true"
   sleep 1.2
 else
   say "CDC bridge 已在运行，跳过。"
@@ -118,7 +118,7 @@ timeout -k 1 8 ros2 service call /servo_node/pause_servo std_srvs/srv/SetBool '{
 say "检测节点 + 手眼 TF…"
 python3 "${SCRIPT_DIR}/track_control.py" hub || say "WARN: hub vision 未完全就绪，HUD 仍会打开"
 
-say "打开 Tracking Hub 窗口（不自动跟随；点「回初始」再「开始跟随」）…"
+say "打开 Tracking Hub 窗口（不自动跟随；点「开始跟随」会必要时先回初始）…"
 set +e
 python3 "${REPO_ROOT}/scripts/vision/cam_live_view.py"
 rc=$?

@@ -51,7 +51,7 @@ HUD 三个按钮（只停 tracker，**不要杀 bridge**）：
 
 | 按钮 | 行为 |
 |---|---|
-| **开始跟随** | 从当前姿态持续 LIVE 跟随（会关闭六轴拖动） |
+| **开始跟随** | LIVE 跟随（离 handeye 远时会先自动回初始；关闭六轴拖动） |
 | **回初始** | 取消跟随，完整回到 `handeye` |
 | **停止收起** | 取消跟随，收到折叠 `stow` |
 | **六轴拖动** | 暂停跟随，打开滑条（经 `/cdc_servo_bridge/jog_fw`，不占串口）；再点关闭 |
@@ -68,25 +68,20 @@ HUD 三个按钮（只停 tracker，**不要杀 bridge**）：
 起始位（FW）：**`[0, 0, 90, 0, 0, 0]`**（`scripts/home/poses/handeye_start.json`，J5 从 0° 起，跟随中不锁）。  
 每次开 LIVE / 标定板跟踪，先独占串口回这个位，再开 bridge + tracker。
 
-现阶段跟随：**画面中心对准目标，相机到目标 20 cm**（`control_frame:=optical`）。靠近目标会把线速度按误差缩小，避免绕圈。J5 跟随下限 −85°（俯仰应由腕部承担，不要用 J1 绕圈 / J3 折肘硬顶 −70°）。  
-HUD 两个开关（**跟随中须先停再切**）：目标 `标定板 | 螺母`，运动 `只中心 | 中心+J4`（后者放开 J4、锁 J6）。默认只中心。  
-参数：`dummy_vision/config/follow_live.yaml` + HUD 写入的 `follow_session.yaml`。  
-总线：`/tracking/target_pose` + `/tracking/target_quality`。到位 HUD **SPRAY**。  
-手眼标定 `robot_effector_frame:=link5_1_1`（相机在 J5 壳体）；Servo EE 仍是 `link6_1_1`。
+现阶段跟随：**喷枪瞄准**（光心 + 20 cm）+ 到位 **Hold / CDC Quiet**。运动由 **WDLS 解算器**（`wdls_follow_resolver_node`）经 Servo JointJog 下发；J4 自由、J6 锁。  
+HUD 目标开关（**跟随中须先停再切**）：`标定板 | 螺母`（螺母 LIVE 后置）。  
+参数：`dummy_vision/config/follow_live.yaml` + `follow_session.yaml`。定案：`docs/跟随优化定案.md`。  
+总线：`/tracking/target_pose` + `/tracking/target_quality`。  
+手眼标定 `robot_effector_frame:=link5_1_1`（相机在 J5 壳体）。
 
 ```bash
-# 串口空闲后
-python3 scripts/home/cdc_home_seven.py --preset handeye
-python3 -u scripts/home/cdc_servo_bridge.py --ros-args -p joint_soft_half_range_deg:=0.0
-# 另开（或直接: bash scripts/home/start_board_track.sh）
-ros2 run dummy_vision aruco_servo_tracker_node --ros-args \
-  -r __node:=aruco_servo_tracker \
-  --params-file dummy_moveit_ws/dummy_vision/config/follow_live.yaml
-python3 scripts/vision/cam_live_view.py
+# 推荐：桌面 Tracking Hub，或
+bash scripts/home/start_tracking_hub.sh
+# 窗口内：点「开始跟随」（折叠态会自动先回初始）
 ```
 
-HUD 芯片：CAL=手眼TF · DET=板 · TGT=到位 · SPRAY=喷枪对准 · NUT=螺母 · MOV=运动 · RUN=跟随 · SRV=Servo。  
-绿点到 AIM ≈ 0 且 Δz≈0 即到位。`/tracking/status` 为 JSON 状态。
+HUD 芯片：CAL=手眼TF · DET=板 · TGT=目标新鲜 · SPRAY=喷枪对准(Hold) · NUT=螺母 · MOV=运动 · RUN=跟随 · SRV=Servo。  
+**是否对准**：青色 AIM 准心 ↔ 绿色板中心点；`aim vs board: 0px` 且 SPRAY 亮、偏心/Δz≈0 即到位。`/tracking/status` 为 JSON。
 
 ## 臂「看着该动却不动」
 

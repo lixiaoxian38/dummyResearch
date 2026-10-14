@@ -16,8 +16,11 @@
   - [x] HUD 开关：标定板|螺母 × 只中心|中心+J4（须先停跟再切；写入 `follow_session.yaml`）
   - [x] quality 门控 0.4、速度×quality、丢检 coast 0.4 s；去掉光轴 4 cm slide
   - [x] 螺母检测：深度质心 + 六角轮廓，HUD 洋红十字；选「螺母」后接到 tracker
-  - [ ] 真机验收：到位不绕圈（近距降增益）；J5 可俯到 −85° 而不是钉在 −70 用 J3 补；螺母十字稳定后再 LIVE；限速暂不改
-  - [ ] 实验：`control_frame:=ee`（J6 轴对板心 / 法兰 20 cm）— 待光轴与 −Y 对齐后再开
+  - [x] WDLS 解算器骨架：`wdls_follow_resolver_node`（Target bus → JointJog）；旧 twist tracker 退出启动路径
+  - [x] HUD 去掉只中心/中心+J4；默认 J4 自由、J6 锁；定案见 `docs/跟随优化定案.md`
+  - [ ] 真机验收 WDLS：绕圈→Hold→CDC Quiet；调 `joint_weights` / `nullspace_gain`
+  - [ ] 螺母：总线已通，LIVE 验收后置
+  - [ ] 实验：`control_frame:=ee` — 暂缓（本轮走 WDLS optical）
 - [ ] 单位 Windows：Tailscale + Cursor Remote SSH
 - [ ] 电源建议日常用 **12V ≥6A**（20V 能动但更抖）
 
@@ -32,7 +35,8 @@
 
 - 主机：`lxx01` / 路径 `/home/lxx/Projects/dummyResearch`
 - 控制口：`/dev/ttyACM0`，协议见 `docs/windows_cdc_control.md`
-- **跟随**：桌面「Dummy 跟随控制台」或 `bash scripts/home/start_tracking_hub.sh`（再点 HUD「开始跟随」）
+- **跟随**：桌面「Dummy 跟随控制台」或 `bash scripts/home/start_tracking_hub.sh` → HUD「开始跟随」（WDLS 解算器）
+- **定案**：`docs/跟随优化定案.md` · `GLOSSARY.md` · ADR `docs/adr/0001-wdls-nullspace-follow-resolver.md`
 - **参数**：`dummy_moveit_ws/dummy_vision/config/follow_live.yaml`
 - **手眼**：`~/.ros2/easy_handeye2/calibrations/dummy_eih_calib.calib`（effector=`link5_1_1`）
 - **收起**：`bash scripts/home/stow.sh`（断电 / 杀 bridge 前必须）
