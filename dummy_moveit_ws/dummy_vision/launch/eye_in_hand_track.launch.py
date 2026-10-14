@@ -152,8 +152,8 @@ def generate_launch_description():
     actions.append(
         Node(
             package="dummy_vision",
-            executable="nut_detector_node",
-            name="nut_detector",
+            executable="charger_detector_node",
+            name="charger_detector",
             output="screen",
             parameters=tracker_params,
         )

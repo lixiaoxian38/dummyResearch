@@ -8,7 +8,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 SESSION_YAML = REPO / "dummy_moveit_ws" / "dummy_vision" / "config" / "follow_session.yaml"
 
-VALID_SOURCES = ("board", "nut")
+VALID_SOURCES = ("board", "charger")
 
 
 def load() -> dict:

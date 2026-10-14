@@ -30,8 +30,24 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/${UID}}"
 
 say() { echo "$*"; echo "$(date '+%F %T') $*" >>"${HUB_LOG}"; }
 
+# pgrep -f matches *any* argv that mentions the string — including Cursor agent
+# shells. Prefer exact binary name (-x) or python cmdline; filter sandbox clutter.
 _running() {
-  pgrep -f "$1" >/dev/null 2>&1
+  pgrep -af "$1" 2>/dev/null | grep -vE 'cursorsandbox|/cursor/resources|start_tracking_hub\.sh' >/dev/null
+}
+
+# True only for a real HUD python process — not Cursor/agent shells that
+# mention cam_live_view.py in their argv (pgrep -f false positive → flash-exit).
+_hud_running() {
+  pgrep -f '(^|/)python3? .*scripts/vision/cam_live_view\.py' >/dev/null 2>&1
+}
+
+# Real Fibre HW node (ros2 run / install lib), not chat/shells quoting the name.
+_fibre_running() {
+  pgrep -x dummy_servo_hardware >/dev/null 2>&1 && return 0
+  pgrep -af 'dummy_servo_hardware' 2>/dev/null \
+    | grep -vE 'cursorsandbox|/cursor/resources|start_tracking_hub\.sh|grep' \
+    | grep -E 'ros2|/install/|lib/dummy' >/dev/null
 }
 
 _bg() {
@@ -48,9 +64,11 @@ source "${SCRIPT_DIR}/env.sh"
 cd "${REPO_ROOT}"
 say "========== Dummy Tracking Hub =========="
 
-if _running "scripts/vision/cam_live_view.py"; then
+if _hud_running; then
   say "Tracking Hub 窗口已在运行。把板放到相机前，用窗口里的按钮。"
   wmctrl -a "Dummy Tracking Hub" 2>/dev/null || true
+  # Desktop double-click closes on exit 0 — pause so the message is readable.
+  read -r -p "按回车关闭…" _ || true
   exit 0
 fi
 
@@ -67,7 +85,7 @@ if [[ ! -e /dev/ttyACM0 ]]; then
   exit 1
 fi
 
-if _running "dummy_servo_hardware"; then
+if _fibre_running; then
   say "ERROR: Fibre dummy_servo_hardware 在跑，会和 CDC 抢口。先停 Fibre 再开本程序。"
   read -r -p "按回车关闭…" _ || true
   exit 1

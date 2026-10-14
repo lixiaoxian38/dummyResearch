@@ -12,14 +12,14 @@
   - [x] LIVE 光轴跟随：画面中心对板 + 相机距板 **20 cm**；参数统一 `config/follow_live.yaml`
   - [x] 操作台 HUD：`cam_live_view.py`（CAL/DET/TGT/MOV/RUN/SRV + `/tracking/status`）
   - [x] HUD 集成六轴拖动：`pause` + `/cdc_servo_bridge/jog_fw` 滑条（不占第二串口）
-  - [x] TargetPose 总线：`/tracking/target_pose` + `/tracking/target_quality`（mux 选板/螺母）
-  - [x] HUD 开关：标定板|螺母 × 只中心|中心+J4（须先停跟再切；写入 `follow_session.yaml`）
+  - [x] TargetPose 总线：`/tracking/target_pose` + `/tracking/target_quality`（mux 选板/杯）
+  - [x] HUD 开关：标定板|杯（LIVE 可切；写入 `follow_session.yaml`）
   - [x] quality 门控 0.4、速度×quality、丢检 coast 0.4 s；去掉光轴 4 cm slide
-  - [x] 螺母检测：深度质心 + 六角轮廓，HUD 洋红十字；选「螺母」后接到 tracker
-  - [x] WDLS 解算器骨架：`wdls_follow_resolver_node`（Target bus → JointJog）；旧 twist tracker 退出启动路径
+  - [x] 杯检测：`cup_detector_node`（HSV 蓝圆 + 邻域深度中位；45–51 mm）；顶替原螺母槽位
+  - [x] WDLS 解算器：板 20 cm / 杯 10 cm（`desired_cup_in_ee_z`）；旧 twist tracker 退出启动路径
   - [x] HUD 去掉只中心/中心+J4；默认 J4 自由、J6 锁；定案见 `docs/跟随优化定案.md`
-  - [ ] 真机验收 WDLS：绕圈→Hold→CDC Quiet；调 `joint_weights` / `nullspace_gain`
-  - [ ] 螺母：总线已通，LIVE 验收后置
+  - [ ] 真机验收 WDLS（板）：绕圈→Hold→CDC Quiet；调 `joint_weights` / `nullspace_gain`
+  - [ ] 真机验收杯 LIVE：黄木纹桌清干扰；拧 `cup_h_*` / 直径窗；AIM+SPRAY @ ~10 cm
   - [ ] 实验：`control_frame:=ee` — 暂缓（本轮走 WDLS optical）
 - [ ] 单位 Windows：Tailscale + Cursor Remote SSH
 - [ ] 电源建议日常用 **12V ≥6A**（20V 能动但更抖）

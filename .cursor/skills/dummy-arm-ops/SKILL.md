@@ -69,7 +69,7 @@ HUD 三个按钮（只停 tracker，**不要杀 bridge**）：
 每次开 LIVE / 标定板跟踪，先独占串口回这个位，再开 bridge + tracker。
 
 现阶段跟随：**喷枪瞄准**（光心 + 20 cm）+ 到位 **Hold / CDC Quiet**。运动由 **WDLS 解算器**（`wdls_follow_resolver_node`）经 Servo JointJog 下发；J4 自由、J6 锁。  
-HUD 目标开关（**跟随中须先停再切**）：`标定板 | 螺母`（螺母 LIVE 后置）。  
+HUD 目标开关（**LIVE 中可切**）：`标定板 | 充电头`（灰绿方块；板 20 cm / 充电头 10 cm）。  
 参数：`dummy_vision/config/follow_live.yaml` + `follow_session.yaml`。定案：`docs/跟随优化定案.md`。  
 总线：`/tracking/target_pose` + `/tracking/target_quality`。  
 手眼标定 `robot_effector_frame:=link5_1_1`（相机在 J5 壳体）。
@@ -80,7 +80,7 @@ bash scripts/home/start_tracking_hub.sh
 # 窗口内：点「开始跟随」（折叠态会自动先回初始）
 ```
 
-HUD 芯片：CAL=手眼TF · DET=板 · TGT=目标新鲜 · SPRAY=喷枪对准(Hold) · NUT=螺母 · MOV=运动 · RUN=跟随 · SRV=Servo。  
+HUD 芯片：CAL=手眼TF · DET=板 · TGT=目标新鲜 · SPRAY=喷枪对准(Hold) · CHG=充电头 · MOV=运动 · RUN=跟随 · SRV=Servo。  
 **是否对准**：青色 AIM 准心 ↔ 绿色板中心点；`aim vs board: 0px` 且 SPRAY 亮、偏心/Δz≈0 即到位。`/tracking/status` 为 JSON。
 
 ## 臂「看着该动却不动」

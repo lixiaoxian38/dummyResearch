@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select board or nut pose → /tracking/target_pose + quality + TF tracking_target."""
+"""Select board or charger pose → /tracking/target_pose + quality + TF tracking_target."""
 
 from __future__ import annotations
 
@@ -23,11 +23,11 @@ class TrackingTargetMux(Node):
         self.stale_sec = float(self.get_parameter("stale_sec").value)
 
         self._board: PoseStamped | None = None
-        self._nut: PoseStamped | None = None
+        self._charger: PoseStamped | None = None
         self._board_q = 0.0
-        self._nut_q = 0.0
+        self._charger_q = 0.0
         self._board_t = 0.0
-        self._nut_t = 0.0
+        self._charger_t = 0.0
 
         self.pub_pose = self.create_publisher(PoseStamped, "/tracking/target_pose", 10)
         self.pub_q = self.create_publisher(Float32, "/tracking/target_quality", 10)
@@ -35,8 +35,8 @@ class TrackingTargetMux(Node):
 
         self.create_subscription(PoseStamped, "/tracking/board_pose", self._on_board, 10)
         self.create_subscription(Float32, "/tracking/board_quality", self._on_board_q, 10)
-        self.create_subscription(PoseStamped, "/tracking/nut_pose", self._on_nut, 10)
-        self.create_subscription(Float32, "/tracking/nut_quality", self._on_nut_q, 10)
+        self.create_subscription(PoseStamped, "/tracking/charger_pose", self._on_charger, 10)
+        self.create_subscription(Float32, "/tracking/charger_quality", self._on_charger_q, 10)
         self.create_timer(1.0 / 30.0, self._tick)
 
         self.get_logger().info(
@@ -53,18 +53,19 @@ class TrackingTargetMux(Node):
     def _on_board_q(self, msg: Float32) -> None:
         self._board_q = float(msg.data)
 
-    def _on_nut(self, msg: PoseStamped) -> None:
-        self._nut = msg
-        self._nut_t = self._now()
+    def _on_charger(self, msg: PoseStamped) -> None:
+        self._charger = msg
+        self._charger_t = self._now()
 
-    def _on_nut_q(self, msg: Float32) -> None:
-        self._nut_q = float(msg.data)
+    def _on_charger_q(self, msg: Float32) -> None:
+        self._charger_q = float(msg.data)
 
     def _tick(self) -> None:
         src = str(self.get_parameter("follow_source").value).strip().lower()
         now = self._now()
-        if src == "nut":
-            pose, q, t = self._nut, self._nut_q, self._nut_t
+        if src in ("charger", "cup"):  # cup: legacy session alias
+            pose, q, t = self._charger, self._charger_q, self._charger_t
+            src = "charger"
         else:
             src = "board"
             pose, q, t = self._board, self._board_q, self._board_t

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Live D415 preview — Dummy tracking operator console + 6-axis jog.
 
-LIVE: optical AIM on board, camera-to-board 20 cm.
+LIVE: optical AIM — board 20 cm / charger (sage brick) 10 cm.
 Jog: OpenCV trackbars → /cdc_servo_bridge/jog_fw (no second serial writer).
 
 Usage:
   source /opt/ros/jazzy/setup.bash && source dummy_moveit_ws/install/setup.bash
   python3 scripts/vision/cam_live_view.py
 Buttons: 开始跟随 / 回初始 / 停止收起 / 六轴拖动
-Toggles (idle): 标定板|螺母 — 跟随中须先停再切；运动走 WDLS（J4 自由 / J6 锁）
+Toggles: 标定板|充电头 — LIVE 中可切；运动走 WDLS（J4 自由 / J6 锁）
 Keys: 1/s start, 2/h handeye, 3/x stow, 4/j jog, q quit
 """
 
@@ -174,9 +174,13 @@ class CamLiveView(Node):
         self._toggle_rects: list[tuple[str, tuple[int, int, int, int]]] = []
         sess = load_follow_session()
         self._follow_source = str(sess["follow_source"])
-        self._nut_px = None
-        self._nut_q = 0.0
-        self._nut_t = 0.0
+        if self._follow_source == "cup":
+            self._follow_source = "charger"
+        if self._follow_source not in ("board", "charger"):
+            self._follow_source = "board"
+        self._chg_px = None
+        self._chg_q = 0.0
+        self._chg_t = 0.0
         self._tgt_q = 0.0
         self._tgt_q_t = 0.0
 
@@ -225,15 +229,15 @@ class CamLiveView(Node):
         )
         self.create_subscription(ServoStatus, "/servo_node/status", self._cb_status, 10)
         self.create_subscription(String, "/tracking/status", self._cb_track_status, 10)
-        self.create_subscription(PointStamped, "/tracking/nut_px", self._cb_nut_px, 10)
-        self.create_subscription(Float32, "/tracking/nut_quality", self._cb_nut_q, 10)
+        self.create_subscription(PointStamped, "/tracking/charger_px", self._cb_chg_px, 10)
+        self.create_subscription(Float32, "/tracking/charger_quality", self._cb_chg_q, 10)
         self.create_subscription(Float32, "/tracking/target_quality", self._cb_tgt_q, 10)
         self.create_timer(0.05, self._tick_ee_tf)
         self.create_timer(1.0, self._tick_handeye_tf)
         self.create_timer(0.08, self._tick_jog_send)
 
         self.get_logger().info(
-            "跟随控制台：板/螺母（停跟后切换）+ WDLS 跟随三键 + 六轴拖动；q 退出"
+            "跟随控制台：板/充电头（LIVE 可切）+ WDLS 跟随三键 + 六轴拖动；q 退出"
         )
 
     def request_cmd(self, cmd: str) -> None:
@@ -302,7 +306,7 @@ class CamLiveView(Node):
         threading.Thread(target=_run, daemon=True).start()
 
     def _src_label(self) -> str:
-        return "螺母" if self._follow_source == "nut" else "标定板"
+        return "充电头" if self._follow_source == "charger" else "标定板"
 
     def _request_toggle(self, cmd: str) -> None:
         with self._lock:
@@ -313,31 +317,37 @@ class CamLiveView(Node):
         src = self._follow_source
         if cmd == "src_board":
             src = "board"
-        elif cmd == "src_nut":
-            src = "nut"
+        elif cmd == "src_charger":
+            src = "charger"
         else:
             return
         if src == self._follow_source:
-            if mode == "following":
-                with self._lock:
-                    self._busy_msg = (
-                        f"正在跟随{self._src_label()}。换目标请先点「停止跟随」"
-                    )
             return
         self._follow_source = src
         save_follow_session(follow_source=self._follow_source)
-        if mode == "following":
-            with self._lock:
-                self._busy_msg = (
-                    f"已记下 {self._src_label()}。"
-                    "先点「停止跟随」，再点「开始跟随」才会换"
+
+        def _push() -> None:
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(CTRL), "source", src],
+                    cwd=str(REPO),
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
-        else:
-            with self._lock:
+                if proc.returncode != 0:
+                    err = ((proc.stdout or "") + (proc.stderr or "")).strip()
+                    self.get_logger().warn(f"set source failed: {err[-200:]}")
+            except Exception as exc:
+                self.get_logger().warn(f"set source: {exc}")
+
+        threading.Thread(target=_push, daemon=True).start()
+        with self._lock:
+            if mode == "following":
+                self._busy_msg = f"已切到{self._src_label()}（LIVE）"
+            else:
                 self._busy_msg = f"下次跟随：{self._src_label()}（WDLS）"
-        self.get_logger().info(
-            f"HUD session src={self._follow_source} live={mode}"
-        )
+        self.get_logger().info(f"HUD session src={self._follow_source} live={mode}")
 
     def _request_jog(self) -> None:
         with self._lock:
@@ -539,12 +549,12 @@ class CamLiveView(Node):
         except json.JSONDecodeError:
             pass
 
-    def _cb_nut_px(self, msg: PointStamped) -> None:
-        self._nut_px = (float(msg.point.x), float(msg.point.y))
-        self._nut_t = time.time()
+    def _cb_chg_px(self, msg: PointStamped) -> None:
+        self._chg_px = (float(msg.point.x), float(msg.point.y))
+        self._chg_t = time.time()
 
-    def _cb_nut_q(self, msg: Float32) -> None:
-        self._nut_q = float(msg.data)
+    def _cb_chg_q(self, msg: Float32) -> None:
+        self._chg_q = float(msg.data)
 
     def _cb_tgt_q(self, msg: Float32) -> None:
         self._tgt_q = float(msg.data)
@@ -619,18 +629,18 @@ class CamLiveView(Node):
         cv2.putText(
             bgr, "AIM", (cx + 16, cy - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cyan, 2, cv2.LINE_AA
         )
-        nut_fresh = (time.time() - self._nut_t) < 0.4 and self._nut_px is not None
-        if nut_fresh:
-            nx, ny = int(round(self._nut_px[0])), int(round(self._nut_px[1]))
+        chg_fresh = (time.time() - self._chg_t) < 0.4 and self._chg_px is not None
+        if chg_fresh:
+            nx, ny = int(round(self._chg_px[0])), int(round(self._chg_px[1]))
             mag = (180, 80, 255)
             cv2.drawMarker(bgr, (nx, ny), mag, cv2.MARKER_CROSS, 22, 2, cv2.LINE_AA)
             cv2.circle(bgr, (nx, ny), 12, mag, 1, cv2.LINE_AA)
             cv2.putText(
-                bgr, "NUT", (nx + 14, ny + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, mag, 2, cv2.LINE_AA
+                bgr, "CHG", (nx + 14, ny + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, mag, 2, cv2.LINE_AA
             )
         if board_px is None:
-            nut_txt = f"nut q={self._nut_q:.2f}" if nut_fresh else "nut: —"
-            return f"aim: 光轴主点   board: —   {nut_txt}"
+            chg_txt = f"chg q={self._chg_q:.2f}" if chg_fresh else "chg: —"
+            return f"aim: 光轴主点   board: —   {chg_txt}"
         bx, by = int(round(board_px[0])), int(round(board_px[1]))
         cv2.circle(bgr, (bx, by), 8, (0, 255, 80), 2, cv2.LINE_AA)
         cv2.circle(bgr, (bx, by), 2, (0, 255, 80), -1, cv2.LINE_AA)
@@ -687,18 +697,19 @@ class CamLiveView(Node):
         z_err = st.get("z_err_cm")
         xy_cm = st.get("xy_cm")
         phase = st.get("phase") or ("—" if mode != "following" else "?")
+        src = st.get("follow_source") or self._follow_source
+        want_z = 10.0 if src == "charger" else 20.0
         if z_cm is None and self._last_pose_xyz is not None and ros_seen:
             z_cm = self._last_pose_xyz[2] * 100.0
             xy_cm = math.hypot(self._last_pose_xyz[0], self._last_pose_xyz[1]) * 100.0
-            z_err = z_cm - 20.0
+            z_err = z_cm - want_z
 
         q = st.get("quality")
         if q is None and (now - self._tgt_q_t) < 0.5:
             q = self._tgt_q
-        src = st.get("follow_source") or self._follow_source
         metrics = [
             f"相位 {phase}",
-            f"目标 {'螺母' if src == 'nut' else '板'}",
+            f"目标 {'充电头' if src == 'charger' else '板'}",
             f"q {q:.2f}" if q is not None else "q —",
             f"距 {z_cm:.1f}cm" if z_cm is not None else "距 —",
             f"Δz {z_err:+.1f}cm" if z_err is not None else "Δz —",
@@ -716,19 +727,19 @@ class CamLiveView(Node):
             board_line = "标定板：仅本地看见（检查 aruco_detector）"
         else:
             board_line = "标定板：丢失 — 请将 ORIGINAL id0 举入画面"
-        nut_line = (
-            f"螺母：q={self._nut_q:.2f}"
-            if (now - self._nut_t) < 0.4
-            else "螺母：未检出（深色六角 ~20–30mm）"
+        chg_line = (
+            f"充电头：q={self._chg_q:.2f}"
+            if (now - self._chg_t) < 0.4
+            else "充电头：未检出（灰绿方块 ~45mm）"
         )
-        _put_zh(bgr, board_line + "  ·  " + nut_line, (12, 92), (230, 230, 230), size=14)
+        _put_zh(bgr, board_line + "  ·  " + chg_line, (12, 92), (230, 230, 230), size=14)
         self._draw_toggles(bgr, w)
 
         if busy_msg:
             _put_zh(bgr, busy_msg, (12, panel_h - 22), (0, 220, 255), size=16)
 
         chip_y = h - BAR_H - 44
-        nut_on = (now - self._nut_t) < 0.4
+        chg_on = (now - self._chg_t) < 0.4
         servo_ok = self._servo_code == 0 and (now - self._servo_t) < 1.0
         servo_on = self._servo_code is not None and (now - self._servo_t) < 1.0
         spray = bool(st.get("spray") or st.get("on_target"))
@@ -737,7 +748,7 @@ class CamLiveView(Node):
             ("DET", ros_seen or local_seen, ros_seen),
             ("TGT", des_ok, spray),
             ("SPRAY", spray, spray),
-            ("NUT", nut_on, nut_on and self._nut_q >= 0.4),
+            ("CHG", chg_on, chg_on and self._chg_q >= 0.4),
             ("MOV", moving, moving),
             ("RUN", mode == "following", mode == "following"),
             ("JOG", mode == "jogging", mode == "jogging"),
@@ -773,7 +784,7 @@ class CamLiveView(Node):
         y0, y1 = 118, 144
         pair = (
             ("src_board", "标定板", self._follow_source == "board"),
-            ("src_nut", "螺母", self._follow_source == "nut"),
+            ("src_charger", "充电头", self._follow_source == "charger"),
         )
         rects: list[tuple[str, tuple[int, int, int, int]]] = []
         x = 12

@@ -126,7 +126,7 @@ ros2 launch dummy_vision eye_in_hand_track.launch.py \
 |---|---|---|
 | `dry_run` | false（HUD start） | 不发 `/servo_node/delta_twist_cmds` |
 | `control_frame` | optical | 画面主点对目标心；`ee` 为 J6 穿轴实验模式 |
-| `follow_source` | board（可 HUD 切 nut） | mux 选标定板或螺母 |
+| `follow_source` | board（可 HUD 切 cup） | mux 选标定板或杯 |
 | `desired_marker_in_ee_z` | 0.20 | 相机到目标 20 cm |
 | `follow_orientation` | false（HUD 可开） | 跟姿态；bridge 放开 J4、锁 J6 |
 | `quality_gate` | 0.4 | 低于此当丢检，走 coast |
@@ -137,14 +137,15 @@ ros2 launch dummy_vision eye_in_hand_track.launch.py \
 | `trace_dir` | `/tmp/dummy_track_ctrl/runs` | 跟随 JSONL |
 
 状态话题：`/tracking/status`（JSON：phase、quality、spray、xy/z 误差）。  
-总线：`/tracking/target_pose` + `/tracking/target_quality`（mux）；板 `/tracking/board_*`，螺母 `/tracking/nut_*`。
+总线：`/tracking/target_pose` + `/tracking/target_quality`（mux）；板 `/tracking/board_*`，杯 `/tracking/cup_*`。  
+距离：板 `desired_marker_in_ee_z=0.20`，杯 `desired_cup_in_ee_z=0.10`。
 
 ## 节点一览
 
 | 节点 | 作用 |
 |---|---|
 | `aruco_detector_node` | PnP + `camera_marker` + `/tracking/board_pose` |
-| `nut_detector_node` | 深度质心 + 六角 → `/tracking/nut_pose` + HUD 像素 |
+| `cup_detector_node` | HSV 蓝圆 + 邻域深度 → `/tracking/cup_pose` + HUD 像素 |
 | `tracking_target_mux_node` | 按 `follow_source` 发 `/tracking/target_*` 与 TF `tracking_target` |
 | `aruco_servo_tracker_node` | quality/coast PBVS → Servo Twist + `/tracking/status` |
 | `cam_live_view.py` | 操作台：目标/运动开关 + 跟随三键 + 六轴拖动 + SPRAY/NUT 芯片 |

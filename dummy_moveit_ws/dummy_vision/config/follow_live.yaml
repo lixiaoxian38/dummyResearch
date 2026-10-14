@@ -1,9 +1,10 @@
 # LIVE follow parameters (single source of truth).
-# Used by: wdls_follow_resolver (motion), mux/nut, track_control.py
+# Used by: wdls_follow_resolver (motion), mux/charger, track_control.py
 #
-# Optical Spray Aim: principal point on target, camera-to-target 20 cm.
+# Optical Spray Aim: principal point on target.
+#   board → 20 cm; charger → 10 cm (desired_charger_in_ee_z).
 # Motion: WDLS + null-space JointJog (see docs/跟随优化定案.md).
-# HUD session (follow_session.yaml) selects board|nut only.
+# HUD session (follow_session.yaml) selects board|charger only.
 
 /**:
   ros__parameters:
@@ -18,18 +19,33 @@
     desired_marker_in_ee_x: 0.0
     desired_marker_in_ee_y: 0.0
     desired_marker_in_ee_z: 0.20
+    desired_charger_in_ee_z: 0.10
+    # legacy alias so old sessions still get 10 cm if resolver only sees cup key
+    desired_cup_in_ee_z: 0.10
     quality_gate: 0.4
     coast_sec: 0.25
-    nut_diameter_m: 0.025
-    nut_diameter_min_m: 0.018
-    nut_diameter_max_m: 0.035
+
+    # Sage-green square 35W charger (~45 mm side).
+    charger_side_m: 0.045
+    charger_side_min_m: 0.030
+    charger_side_max_m: 0.075
+    charger_z_min: 0.08
+    charger_z_max: 0.55
+    charger_h_min: 25.0
+    charger_h_max: 70.0
+    charger_s_min: 20.0
+    charger_s_max: 200.0
+    charger_v_min: 40.0
+    charger_v_max: 255.0
+    # Desk-level view foreshortens the square (seen ~1.6).
+    charger_aspect_max: 1.90
+    charger_rect_fill_min: 0.50
+    charger_depth_half_px: 8
 
     max_marker_z: 0.60
     max_marker_xy: 0.30
-    # Pose age (not mux q=0) decides LOST. 1.0s covers ArUco flicker without flying blind.
     lost_timeout_sec: 1.0
 
-    # Speed: keep near-zone gain high so it does not crawl into the aim.
     max_linear_vel: 0.085
     max_joint_vel: 0.75
     linear_gain: 1.15
@@ -37,11 +53,9 @@
     near_gain_min: 0.50
     dls_lambda: 0.055
     nullspace_gain: 0.22
-    # Larger weight → less joint motion. Prefer J5, discourage idle J1; J6 unused.
     joint_weights: [5.0, 1.6, 1.6, 1.0, 0.45, 8.0]
     nullspace_attract_ros: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-    # Tighter Spray Aim hold (~5mm ≈ 15px at 20cm). Resume band avoids chatter.
     hold_xy_m: 0.005
     hold_z_m: 0.012
     hold_resume_xy_m: 0.014

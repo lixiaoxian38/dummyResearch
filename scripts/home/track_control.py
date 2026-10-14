@@ -7,6 +7,7 @@
   python3 scripts/home/track_control.py pause     # cancel follow, hold pose (for jog)
 
   python3 scripts/home/track_control.py hub       # vision nodes + handeye TF, no LIVE
+  python3 scripts/home/track_control.py source charger  # board|charger (OK mid-LIVE)
 
 Follow params: dummy_moveit_ws/dummy_vision/config/follow_live.yaml
 """
@@ -29,6 +30,7 @@ CALIB_FILE = Path.home() / ".ros2/easy_handeye2/calibrations/dummy_eih_calib.cal
 
 sys.path.insert(0, str(HOME))
 from follow_session import load as load_follow_session  # noqa: E402
+from follow_session import save as save_follow_session  # noqa: E402
 
 
 def _follow_source() -> str:
@@ -294,6 +296,8 @@ def _ros2_run_if_missing(needle: str, executable: str, extra: str = "") -> None:
 def _ensure_tracking_nodes(*, restart: bool = False) -> None:
     if restart:
         _kill("tracking_target_mux")
+        _kill("charger_detector_node")
+        _kill("cup_detector_node")
         _kill("nut_detector_node")
         _kill("aruco_detector_node")
         time.sleep(0.35)
@@ -304,22 +308,28 @@ def _ensure_tracking_nodes(*, restart: bool = False) -> None:
         f"-r __node:=tracking_target_mux {_params_files()}",
     )
     _ros2_run_if_missing(
-        "nut_detector_node",
-        "nut_detector_node",
+        "charger_detector_node",
+        "charger_detector_node",
         _params_files(),
     )
 
 
 def _set_mux_source(src: str) -> None:
+    """Push follow_source to mux + WDLS resolver (LIVE mid-switch OK)."""
+    if src == "cup":
+        src = "charger"
+    if src not in ("board", "charger"):
+        src = "board"
     env = os.environ.copy()
-    cmd = (
-        "source /opt/ros/jazzy/setup.bash && "
-        f"source {WS}/install/setup.bash && "
-        f"timeout 5 ros2 param set /tracking_target_mux follow_source {src}"
-    )
-    subprocess.call(
-        ["bash", "-lc", cmd], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+    for node in ("/tracking_target_mux", "/wdls_follow_resolver"):
+        cmd = (
+            "source /opt/ros/jazzy/setup.bash && "
+            f"source {WS}/install/setup.bash && "
+            f"timeout 5 ros2 param set {node} follow_source {src}"
+        )
+        subprocess.call(
+            ["bash", "-lc", cmd], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
 
 
 def _spawn(name: str, args: list[str], cwd: Path) -> None:
@@ -442,17 +452,32 @@ def start_follow() -> None:
     )
     _spawn("wdls_resolver", ["bash", "-lc", tr], WS)
     _unpause_servo()
+    if src == "cup":
+        src = "charger"
+    standoff = "10cm" if src == "charger" else "20cm"
     _log(
-        f"LIVE follow: WDLS resolver | optical 20cm | src={src} | "
+        f"LIVE follow: WDLS resolver | optical {standoff} | src={src} | "
         f"J4 free / J6 lock | handeye={handeye_src} | params={FOLLOW_YAML.name}+session"
     )
 
 
 def hub_vision() -> None:
-    """Bring up detector / mux / nut + handeye TF. Do not start LIVE tracker."""
+    """Bring up detector / mux / charger + handeye TF. Do not start LIVE tracker."""
     src = _ensure_handeye_tf()
     _ensure_tracking_nodes(restart=False)
+    _set_mux_source(_follow_source())
     _log(f"hub vision ready handeye={src} (click 开始跟随 in Tracking Hub)")
+
+
+def set_follow_source(src: str) -> None:
+    """HUD / CLI: persist session + push mux & WDLS (works mid-LIVE)."""
+    if src == "cup":
+        src = "charger"
+    if src not in ("board", "charger"):
+        src = "board"
+    save_follow_session(follow_source=src)
+    _set_mux_source(src)
+    _log(f"follow_source={src} (mux+resolver)")
 
 
 def go_handeye() -> None:
@@ -474,17 +499,22 @@ def main() -> int:
         "stop",
         "pause",
         "hub",
+        "source",
     }:
         print(__doc__)
         return 2
     try:
-        {
-            "start": start_follow,
-            "handeye": go_handeye,
-            "stop": go_stow,
-            "pause": pause_follow,
-            "hub": hub_vision,
-        }[sys.argv[1]]()
+        cmd = sys.argv[1]
+        if cmd == "source":
+            set_follow_source(sys.argv[2] if len(sys.argv) > 2 else "board")
+        else:
+            {
+                "start": start_follow,
+                "handeye": go_handeye,
+                "stop": go_stow,
+                "pause": pause_follow,
+                "hub": hub_vision,
+            }[cmd]()
     except Exception as exc:
         _log(f"ERROR: {exc}")
         return 1

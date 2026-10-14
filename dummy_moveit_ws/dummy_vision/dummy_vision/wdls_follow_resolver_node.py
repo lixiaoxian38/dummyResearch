@@ -67,9 +67,12 @@ class WdlsFollowResolver(Node):
         self.declare_parameter("dry_run", False)
         self.declare_parameter("quality_gate", 0.4)
         self.declare_parameter("coast_sec", 0.4)
+        self.declare_parameter("follow_source", "board")
         self.declare_parameter("desired_marker_in_ee_x", 0.0)
         self.declare_parameter("desired_marker_in_ee_y", 0.0)
         self.declare_parameter("desired_marker_in_ee_z", 0.20)
+        self.declare_parameter("desired_charger_in_ee_z", 0.10)
+        self.declare_parameter("desired_cup_in_ee_z", 0.10)  # legacy alias
         self.declare_parameter("linear_gain", 1.15)
         self.declare_parameter("max_linear_vel", 0.085)
         self.declare_parameter("max_joint_vel", 0.75)
@@ -153,10 +156,22 @@ class WdlsFollowResolver(Node):
         self.create_timer(1.0 / max(rate_hz, 1.0), self.control_tick)
         self.get_logger().info(
             f"WDLS Follow resolver [{'DRY' if self.dry_run else 'LIVE'}] "
-            f"optical→JointJog standoff="
+            f"optical→JointJog board_z="
             f"{float(self.get_parameter('desired_marker_in_ee_z').value):.2f}m "
+            f"charger_z={float(self.get_parameter('desired_charger_in_ee_z').value):.2f}m "
             f"lock_j6={bool(self.get_parameter('lock_j6').value)}"
         )
+
+    def _follow_source(self) -> str:
+        src = str(self.get_parameter("follow_source").value).strip().lower()
+        if src in ("charger", "cup"):
+            return "charger"
+        return "board"
+
+    def _desired_z(self) -> float:
+        if self._follow_source() == "charger":
+            return float(self.get_parameter("desired_charger_in_ee_z").value)
+        return float(self.get_parameter("desired_marker_in_ee_z").value)
 
     def _on_pose(self, msg: PoseStamped) -> None:
         self._tgt_pose = msg
@@ -308,7 +323,8 @@ class WdlsFollowResolver(Node):
         if now_ns - self._last_status_ns < 2e8 and kwargs.get("phase") == self._phase:
             return
         self._last_status_ns = now_ns
-        dz = float(self.get_parameter("desired_marker_in_ee_z").value)
+        dz = self._desired_z()
+        src = self._follow_source()
         phase = str(kwargs.get("phase", self._phase))
         z = kwargs.get("z")
         xy = kwargs.get("xy")
@@ -321,7 +337,7 @@ class WdlsFollowResolver(Node):
             "resolver": "wdls",
             "phase": phase,
             "dry_run": self.dry_run,
-            "follow_source": "board",
+            "follow_source": src,
             "spray": on_tgt,
             "on_target": on_tgt,
             "moving": qdot_norm > 1e-3 and phase in ("track", "approach", "coast"),
@@ -405,7 +421,7 @@ class WdlsFollowResolver(Node):
 
         dx = float(self.get_parameter("desired_marker_in_ee_x").value)
         dy = float(self.get_parameter("desired_marker_in_ee_y").value)
-        dz = float(self.get_parameter("desired_marker_in_ee_z").value)
+        dz = self._desired_z()
         xy_err = math.hypot(mx - dx, my - dy)
         z_err = abs(mz - dz)
         hold_xy = float(self.get_parameter("hold_xy_m").value)
