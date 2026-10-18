@@ -2,17 +2,20 @@
 """Initialize Dummy arm over CDC ASCII for eye-in-hand tracking / calib.
 
 Presets (FW degrees, economy-kit CDC):
-  handeye    0, 0, 90, 0, 0, 0        # follow start (J1/J2=0, J3=90, J4/J5=0)
+  handeye    0, 0, 90, 0, 0, 0        # board follow start (J1/J2=0, J3=90, J4/J5=0)
+  charger    0, -40, 120, 0, +70, 0   # charger follow: look down at desk (FW+ J5)
+  vlm        3, 0, 90, 0, +75, 0      # held desk view, rounded
   handeye_calib -8.7, 20, 90, 0, 60, 0  # old EIH calib pose
-  lookdown   0, -48, 125, 0, -80, 0   # camera roughly toward -Z (table)
+  lookdown   0, -48, 125, 0, -80, 0   # stronger table look (legacy)
   soft7      0, -55, 150, 0, 0, 0     # side/oblique camera (legacy)
   exact7     0, -75, 180, 0, 0, 0     # REST_POSE (sits on old URDF limits)
   stow       same as exact7           # 收起/断电前姿态
 
-Canonical handeye pose file: scripts/home/poses/handeye_start.json
+Canonical poses: scripts/home/poses/handeye_start.json, charger_start.json
 
 Usage:
-  python3 scripts/home/cdc_home_seven.py --preset handeye   # EIH calib start
+  python3 scripts/home/cdc_home_seven.py --preset handeye   # board follow start
+  python3 scripts/home/cdc_home_seven.py --preset charger   # charger desk look-down
   python3 scripts/home/cdc_home_seven.py                     # default: lookdown
   python3 scripts/home/cdc_home_seven.py --preset soft7
   python3 scripts/home/cdc_home_seven.py --exact
@@ -30,6 +33,8 @@ import serial
 
 PRESETS = {
     "handeye": np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0]),
+    "charger": np.array([0.0, -40.0, 120.0, 0.0, 70.0, 0.0]),
+    "vlm": np.array([3.0, 0.0, 90.0, 0.0, 75.0, 0.0]),
     "handeye_calib": np.array([-8.7, 20.0, 90.0, 0.0, 60.0, 0.0]),
     "lookdown": np.array([0.0, -48.0, 125.0, 0.0, -80.0, 0.0]),
     "soft7": np.array([0.0, -55.0, 150.0, 0.0, 0.0, 0.0]),

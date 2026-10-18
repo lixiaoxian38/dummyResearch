@@ -32,9 +32,16 @@ from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from joint_limits_fw import FOLLOW_LIMITS_FW_DEG, JOINT_LIMITS_FW_DEG, SOFTWARE_MARGIN_FW_DEG
+from joint_limits_fw import (
+    FOLLOW_LIMITS_FW_DEG,
+    JOINT_LIMITS_FW_DEG,
+    SOFTWARE_MARGIN_FW_DEG,
+    couple_j3_j5_fw,
+)
 
 HANDEYE_FW = np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
+# Charger follow start: look down at desk (J2/J3 height, J5 pitch).
+CHARGER_FW = np.array([0.0, -40.0, 120.0, 0.0, 70.0, 0.0])
 STOW_FW = np.array([0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
 
 RAD_VOLUMN = np.array([0.0, 0.0, 1.57079, 0.0, 0.0, 0.0])
@@ -114,6 +121,7 @@ class CdcServoBridge(Node):
         self.pub = self.create_publisher(JointState, "/joint_states", 10)
         self.create_subscription(JointTrajectory, "/servo_node/command", self.on_servo, 10)
         self.create_service(Trigger, "~/goto_handeye", self._srv_goto_handeye)
+        self.create_service(Trigger, "~/goto_charger", self._srv_goto_charger)
         self.create_service(Trigger, "~/goto_stow", self._srv_goto_stow)
         self.create_service(Trigger, "~/hold_servo", self._srv_hold)
         self.create_service(Trigger, "~/release_servo", self._srv_release)
@@ -243,6 +251,9 @@ class CdcServoBridge(Node):
 
     def _srv_goto_handeye(self, _req, resp):
         return self._goto_preset("handeye", HANDEYE_FW, resp)
+
+    def _srv_goto_charger(self, _req, resp):
+        return self._goto_preset("charger", CHARGER_FW, resp)
 
     def _srv_goto_stow(self, _req, resp):
         return self._goto_preset("stow", STOW_FW, resp)
@@ -389,6 +400,16 @@ class CdcServoBridge(Node):
                     f"-> {fol.round(1)} (J5 −85…75°, J1 no fake ±120 wall)"
                 )
         target_deg = fol
+
+        coupled, hit_couple = couple_j3_j5_fw(target_deg)
+        if hit_couple:
+            if not hasattr(self, "_cpl_warn_t") or time.time() - self._cpl_warn_t > 2.0:
+                self._cpl_warn_t = time.time()
+                self.get_logger().warn(
+                    f"couple J3/J5 clip want={target_deg.round(1)} -> {coupled.round(1)} "
+                    "(high J3 + +J5 folds wrist into arm)"
+                )
+            target_deg = coupled
 
         # Optional start-centered box (off when half_range<=0). Follow uses abs only.
         if self.half_range > 1e-3:

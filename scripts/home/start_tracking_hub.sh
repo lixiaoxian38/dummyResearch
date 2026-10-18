@@ -103,10 +103,26 @@ else
   say "MoveIt Servo 已在运行，跳过。"
 fi
 
+_camera_streaming() {
+  # Process can be alive after USB glitch / SIGINT while publishing nothing → HUD black.
+  timeout 2 ros2 topic hz /camera/camera/color/image_raw 2>/dev/null | grep -q 'average rate'
+}
+
+_restart_realsense() {
+  say "RealSense 进程在但未出图 — 重启相机…"
+  pkill -f 'realsense2_camera_node' 2>/dev/null || true
+  pkill -f 'rs_launch.py' 2>/dev/null || true
+  sleep 1.2
+  _bg realsense \
+    "source '${SCRIPT_DIR}/env.sh' && exec ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true enable_sync:=true rgb_camera.color_profile:=640,480,15"
+}
+
 if ! _running "realsense2_camera_node" && ! _running "rs_launch.py"; then
   say "启动 D415 RealSense…"
   _bg realsense \
     "source '${SCRIPT_DIR}/env.sh' && exec ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true enable_sync:=true rgb_camera.color_profile:=640,480,15"
+elif ! _camera_streaming; then
+  _restart_realsense
 else
   say "RealSense 已在运行，跳过。"
 fi

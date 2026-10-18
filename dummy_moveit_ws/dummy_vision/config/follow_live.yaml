@@ -20,29 +20,45 @@
     desired_marker_in_ee_y: 0.0
     desired_marker_in_ee_z: 0.20
     desired_charger_in_ee_z: 0.10
+    # Unused while VLM is center-only (resolver zeros optical vz).
+    desired_vlm_in_ee_z: 0.12
     # legacy alias so old sessions still get 10 cm if resolver only sees cup key
     desired_cup_in_ee_z: 0.10
-    quality_gate: 0.4
-    coast_sec: 0.25
 
-    # Sage-green square 35W charger (~45 mm side).
+    # LocateAnything sidecar (scripts/vision/start_locateanything_server.sh)
+    vlm_query: ""
+    vlm_server_url: "http://127.0.0.1:8765"
+    vlm_infer_hz: 1.0
+    vlm_stale_sec: 2.5
+    vlm_mock: false
+    # Live box center = AIM target. Model overrides tracker when jump > this (px).
+    vlm_model_override_px: 80.0
+    # DT detector typically scores ~0.49–0.70 on the real brick.
+    quality_gate: 0.45
+    coast_sec: 0.05
+    confirm_sec: 0.45
+
+    # 35W brick. Live D415: HSV≈(91,68,171); brick depth often flying — use desk plane.
     charger_side_m: 0.045
     charger_side_min_m: 0.030
-    charger_side_max_m: 0.075
+    charger_side_max_m: 0.070
     charger_z_min: 0.08
-    charger_z_max: 0.55
-    charger_h_min: 25.0
-    charger_h_max: 70.0
-    charger_s_min: 20.0
-    charger_s_max: 200.0
-    charger_v_min: 40.0
-    charger_v_max: 255.0
-    # Desk-level view foreshortens the square (seen ~1.6).
-    charger_aspect_max: 1.90
-    charger_rect_fill_min: 0.50
+    charger_z_max: 0.50
+    charger_h_min: 75.0
+    charger_h_max: 105.0
+    charger_s_min: 40.0
+    charger_s_max: 110.0
+    charger_v_min: 80.0
+    charger_v_max: 200.0
+    charger_aspect_max: 1.70
+    charger_rect_fill_min: 0.55
     charger_depth_half_px: 8
+    charger_min_score: 0.35
+    charger_min_area_px: 500.0
+    charger_persist_frames: 5
+    charger_miss_reset: 3
 
-    max_marker_z: 0.60
+    max_marker_z: 0.90
     max_marker_xy: 0.30
     lost_timeout_sec: 1.0
 
@@ -55,6 +71,8 @@
     nullspace_gain: 0.22
     joint_weights: [5.0, 1.6, 1.6, 1.0, 0.45, 8.0]
     nullspace_attract_ros: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Keep the held desk view while centering. ROS rad for FW [3, 0, 90, 0, 75, 0].
+    vlm_nullspace_attract_ros: [0.0524, 0.0, 0.0, 0.0, -1.3090, 0.0]
 
     hold_xy_m: 0.005
     hold_z_m: 0.012

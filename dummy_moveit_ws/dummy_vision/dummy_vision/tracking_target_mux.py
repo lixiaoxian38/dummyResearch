@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select board or charger pose → /tracking/target_pose + quality + TF tracking_target."""
+"""Select board / charger / vlm pose → /tracking/target_pose + quality + TF."""
 
 from __future__ import annotations
 
@@ -17,17 +17,23 @@ class TrackingTargetMux(Node):
         self.declare_parameter("optical_frame", "camera_color_optical_frame")
         self.declare_parameter("target_frame", "tracking_target")
         self.declare_parameter("stale_sec", 0.35)
+        # VLM runs ~1 Hz; allow longer staleness before dropping.
+        self.declare_parameter("vlm_stale_sec", 2.5)
 
         self.optical_frame = str(self.get_parameter("optical_frame").value)
         self.target_frame = str(self.get_parameter("target_frame").value)
         self.stale_sec = float(self.get_parameter("stale_sec").value)
+        self.vlm_stale_sec = float(self.get_parameter("vlm_stale_sec").value)
 
         self._board: PoseStamped | None = None
         self._charger: PoseStamped | None = None
+        self._vlm: PoseStamped | None = None
         self._board_q = 0.0
         self._charger_q = 0.0
+        self._vlm_q = 0.0
         self._board_t = 0.0
         self._charger_t = 0.0
+        self._vlm_t = 0.0
 
         self.pub_pose = self.create_publisher(PoseStamped, "/tracking/target_pose", 10)
         self.pub_q = self.create_publisher(Float32, "/tracking/target_quality", 10)
@@ -37,6 +43,8 @@ class TrackingTargetMux(Node):
         self.create_subscription(Float32, "/tracking/board_quality", self._on_board_q, 10)
         self.create_subscription(PoseStamped, "/tracking/charger_pose", self._on_charger, 10)
         self.create_subscription(Float32, "/tracking/charger_quality", self._on_charger_q, 10)
+        self.create_subscription(PoseStamped, "/tracking/vlm_pose", self._on_vlm, 10)
+        self.create_subscription(Float32, "/tracking/vlm_quality", self._on_vlm_q, 10)
         self.create_timer(1.0 / 30.0, self._tick)
 
         self.get_logger().info(
@@ -60,17 +68,31 @@ class TrackingTargetMux(Node):
     def _on_charger_q(self, msg: Float32) -> None:
         self._charger_q = float(msg.data)
 
+    def _on_vlm(self, msg: PoseStamped) -> None:
+        self._vlm = msg
+        self._vlm_t = self._now()
+
+    def _on_vlm_q(self, msg: Float32) -> None:
+        self._vlm_q = float(msg.data)
+        if self._vlm_q < 1e-6:
+            self._vlm = None
+
     def _tick(self) -> None:
         src = str(self.get_parameter("follow_source").value).strip().lower()
         now = self._now()
         if src in ("charger", "cup"):  # cup: legacy session alias
             pose, q, t = self._charger, self._charger_q, self._charger_t
+            stale = self.stale_sec
             src = "charger"
+        elif src == "vlm":
+            pose, q, t = self._vlm, self._vlm_q, self._vlm_t
+            stale = self.vlm_stale_sec
         else:
             src = "board"
             pose, q, t = self._board, self._board_q, self._board_t
+            stale = self.stale_sec
 
-        if pose is None or (now - t) > self.stale_sec:
+        if pose is None or (now - t) > stale or q < 1e-6:
             out_q = Float32()
             out_q.data = 0.0
             self.pub_q.publish(out_q)

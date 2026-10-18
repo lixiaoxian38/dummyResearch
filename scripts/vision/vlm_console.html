@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>识别指令</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #121418;
+      --card: #1c2129;
+      --line: #2c3440;
+      --text: #e8edf4;
+      --muted: #9aa6b6;
+      --accent: #3d8bfd;
+      --ok: #3dd68c;
+      --warn: #f0b429;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 40px 20px 64px;
+    }
+    h1 { font-size: 28px; font-weight: 650; margin: 0 0 8px; }
+    p.lead { color: var(--muted); margin: 0 0 28px; line-height: 1.5; }
+    form {
+      display: flex;
+      gap: 10px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px;
+    }
+    input {
+      flex: 1;
+      border: 0;
+      outline: none;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      font-size: 20px;
+      padding: 10px 8px;
+    }
+    button {
+      border: 0;
+      border-radius: 10px;
+      background: var(--accent);
+      color: white;
+      font: inherit;
+      font-size: 16px;
+      padding: 0 22px;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.55; cursor: default; }
+    .status {
+      margin-top: 18px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px 18px;
+      display: grid;
+      gap: 8px;
+    }
+    .row { display: flex; justify-content: space-between; gap: 16px; }
+    .k { color: var(--muted); }
+    .v { text-align: right; word-break: break-word; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    pre {
+      margin: 8px 0 0;
+      white-space: pre-wrap;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>识别指令</h1>
+    <p class="lead">先在跟随控制台选 VLM 并点「开始跟随」。每次发送都会先把臂收回桌面初始位，再认新的东西。框在跳时臂不会跟。</p>
+    <form id="f">
+      <input id="q" name="q" autocomplete="off" placeholder="例如 airpods、灰色三通、sage green charger" autofocus />
+      <button id="go" type="submit">发送</button>
+    </form>
+    <section class="status">
+      <div class="row"><span class="k">当前指令</span><span class="v" id="query">—</span></div>
+      <div class="row"><span class="k">结果</span><span class="v" id="state">等待输入</span></div>
+      <div class="row"><span class="k">质量 / 位置</span><span class="v" id="meas">—</span></div>
+      <pre id="raw"></pre>
+    </section>
+  </main>
+  <script>
+    const q = document.getElementById("q");
+    const go = document.getElementById("go");
+    const form = document.getElementById("f");
+    const elQuery = document.getElementById("query");
+    const elState = document.getElementById("state");
+    const elMeas = document.getElementById("meas");
+    const elRaw = document.getElementById("raw");
+
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const text = q.value.trim();
+      if (!text) return;
+      go.disabled = true;
+      try {
+        const res = await fetch("/api/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        elQuery.textContent = text;
+        elState.textContent = "已回初始，正在看画面";
+        elState.className = "v";
+      } catch (err) {
+        elState.textContent = "发送失败";
+        elState.className = "v warn";
+        elRaw.textContent = String(err);
+      } finally {
+        go.disabled = false;
+        q.focus();
+      }
+    });
+
+    async function poll() {
+      try {
+        const res = await fetch("/api/status");
+        const s = await res.json();
+        if (s.query) elQuery.textContent = s.query;
+        if (s.reject === "unstable") {
+          elState.textContent = "框在跳，臂先不动";
+          elState.className = "v warn";
+        } else if (s.reject) {
+          elState.textContent = "未锁定：" + s.reject;
+          elState.className = "v warn";
+        } else if (s.q > 0.4) {
+          elState.textContent = "已锁定";
+          elState.className = "v ok";
+        } else if (s.query) {
+          elState.textContent = "还没在画面里找到";
+          elState.className = "v";
+        }
+        if (s.u != null) {
+          elMeas.textContent = `q ${Number(s.q).toFixed(2)}   像素 (${Math.round(s.u)}, ${Math.round(s.v)})   z ${Number(s.z).toFixed(2)} m`;
+        }
+        elRaw.textContent = s.raw || "";
+      } catch (_err) {
+        elState.textContent = "页面和定位节点断开";
+        elState.className = "v warn";
+      }
+    }
+    setInterval(poll, 500);
+    poll();
+  </script>
+</body>
+</html>

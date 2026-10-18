@@ -55,3 +55,43 @@ JOINT_LIMITS_ROS_DEG = [
     (lo + m, hi - m)
     for (lo, hi), m in zip(JOINT_LIMITS_HW_ROS_DEG, SOFTWARE_MARGIN_FW_DEG)
 ]
+
+
+def couple_j3_j5_fw(deg):
+    """Stop wrist-into-arm: high J3 (fold) plus high +J5 (this mount looks down).
+
+    Single-axis follow box still allows J3=200° and J5=+75° together, which
+    collided on 2026-10-18. Charger start J3=120° / J5=+70° stays legal.
+    Returns a copy and whether any axis was reduced.
+    """
+    import numpy as np
+
+    out = np.array(deg, dtype=float, copy=True)
+    j3 = float(out[2])
+    j5 = float(out[4])
+
+    def j3_cap_for(j5_deg: float) -> float:
+        # J5 +30° → J3 may still reach 200°; J5 +75° → J3 capped at 130°.
+        if j5_deg <= 30.0:
+            return 200.0
+        t = min(1.0, (j5_deg - 30.0) / 45.0)
+        return 200.0 - t * 70.0
+
+    def j5_cap_for(j3_deg: float) -> float:
+        # J3 ≤150° keeps J5 +75°; J3 ≥190° drops J5 cap to +10°.
+        if j3_deg <= 150.0:
+            return 75.0
+        t = min(1.0, (j3_deg - 150.0) / 40.0)
+        return 75.0 - t * 65.0
+
+    changed = False
+    j3_cap = j3_cap_for(j5)
+    if j3 > j3_cap:
+        out[2] = j3_cap
+        j3 = j3_cap
+        changed = True
+    j5_cap = j5_cap_for(j3)
+    if j5 > j5_cap:
+        out[4] = j5_cap
+        changed = True
+    return out, changed

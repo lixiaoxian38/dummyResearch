@@ -67,11 +67,14 @@ class WdlsFollowResolver(Node):
         self.declare_parameter("dry_run", False)
         self.declare_parameter("quality_gate", 0.4)
         self.declare_parameter("coast_sec", 0.4)
+        # Require continuous good quality this long before first motion (charger false-positive guard).
+        self.declare_parameter("confirm_sec", 0.0)
         self.declare_parameter("follow_source", "board")
         self.declare_parameter("desired_marker_in_ee_x", 0.0)
         self.declare_parameter("desired_marker_in_ee_y", 0.0)
         self.declare_parameter("desired_marker_in_ee_z", 0.20)
         self.declare_parameter("desired_charger_in_ee_z", 0.10)
+        self.declare_parameter("desired_vlm_in_ee_z", 0.12)
         self.declare_parameter("desired_cup_in_ee_z", 0.10)  # legacy alias
         self.declare_parameter("linear_gain", 1.15)
         self.declare_parameter("max_linear_vel", 0.085)
@@ -98,6 +101,11 @@ class WdlsFollowResolver(Node):
         self.declare_parameter(
             "nullspace_attract_ros",
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        # VLM desk start in ROS rad: FW [3, 0, 90, 0, 75, 0].
+        self.declare_parameter(
+            "vlm_nullspace_attract_ros",
+            [0.0524, 0.0, 0.0, 0.0, -1.3090, 0.0],
         )
         self.declare_parameter("lock_j6", True)
         self.declare_parameter("joint_jog_topic", "/servo_node/delta_joint_cmds")
@@ -133,9 +141,11 @@ class WdlsFollowResolver(Node):
         self._opt_filt: np.ndarray | None = None
         self._phase = "approach"
         self._leave_hold_t = 0.0
+        self._settle_t0 = 0.0
         self._last_cmd_qdot = np.zeros(6)
         self._coast_t0 = 0.0
         self._coasting = False
+        self._confirm_t0 = 0.0
         self._last_marker_ok = False
         self._servo_ready = self.dry_run
         self._servo_setup_attempts = 0
@@ -166,11 +176,16 @@ class WdlsFollowResolver(Node):
         src = str(self.get_parameter("follow_source").value).strip().lower()
         if src in ("charger", "cup"):
             return "charger"
+        if src == "vlm":
+            return "vlm"
         return "board"
 
     def _desired_z(self) -> float:
-        if self._follow_source() == "charger":
+        src = self._follow_source()
+        if src == "charger":
             return float(self.get_parameter("desired_charger_in_ee_z").value)
+        if src == "vlm":
+            return float(self.get_parameter("desired_vlm_in_ee_z").value)
         return float(self.get_parameter("desired_marker_in_ee_z").value)
 
     def _on_pose(self, msg: PoseStamped) -> None:
@@ -182,6 +197,14 @@ class WdlsFollowResolver(Node):
         # those zeros avoids LOST/coast thrash; lost is decided by pose age.
         q = float(msg.data)
         if q < 1e-6:
+            # VLM query changes must drop the previous point at once.
+            # Waiting out lost_timeout made the arm revisit the old object.
+            if self._follow_source() == "vlm":
+                self._tgt_pose = None
+                self._tgt_stamp_s = 0.0
+                self._tgt_quality = 0.0
+                self._opt_filt = None
+                self._last_marker_ok = False
             return
         self._tgt_quality = q
 
@@ -246,14 +269,15 @@ class WdlsFollowResolver(Node):
     def _lookup(self, parent: str, child: str):
         return self.tf_buffer.lookup_transform(parent, child, rclpy.time.Time())
 
-    def _geometric_jacobian_optical(self) -> np.ndarray | None:
-        """3x6 linear Jacobian of optical-frame origin in base."""
+    def _camera_jacobians(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Optical rotation, 3x6 linear Jacobian, 3x6 angular Jacobian, all in base."""
         try:
             T_base_opt = tf_to_matrix(self._lookup(self.base_frame, self.optical_frame))
         except Exception:
             return None
         p_opt = T_base_opt[:3, 3]
-        J = np.zeros((3, 6))
+        Jv = np.zeros((3, 6))
+        Jw = np.zeros((3, 6))
         for i, link in enumerate(LINK_AFTER_JOINT):
             try:
                 T = tf_to_matrix(self._lookup(self.base_frame, link))
@@ -262,10 +286,38 @@ class WdlsFollowResolver(Node):
             z = T[:3, :3] @ JOINT_AXIS_CHILD[i]
             z = z / max(float(np.linalg.norm(z)), 1e-9)
             p_i = T[:3, 3]
-            J[:, i] = np.cross(z, p_opt - p_i)
+            Jv[:, i] = np.cross(z, p_opt - p_i)
+            Jw[:, i] = z
         if bool(self.get_parameter("lock_j6").value):
-            J[:, 5] = 0.0
-        return J
+            Jv[:, 5] = 0.0
+            Jw[:, 5] = 0.0
+        return T_base_opt[:3, :3], Jv, Jw
+
+    def _geometric_jacobian_optical(self) -> np.ndarray | None:
+        """3x6 linear Jacobian of optical-frame origin in base."""
+        jac = self._camera_jacobians()
+        if jac is None:
+            return None
+        return jac[1]
+
+    @staticmethod
+    def _feature_jacobian_xy(
+        p_cam: np.ndarray, R: np.ndarray, Jv: np.ndarray, Jw: np.ndarray
+    ) -> np.ndarray:
+        """2x6 map from qdot to (px_dot, py_dot) of a fixed point in the optical frame.
+
+        Translation-only Jacobians ignore that J2/J3 also sweep the view, so a
+        corner box runs away. This includes that sweep.
+        """
+        px, py, pz = (float(p_cam[0]), float(p_cam[1]), float(p_cam[2]))
+        Rt = R.T
+        Js = np.zeros((2, 6))
+        for i in range(6):
+            v = Rt @ Jv[:, i]
+            w = Rt @ Jw[:, i]
+            Js[0, i] = -v[0] - w[1] * pz + w[2] * py
+            Js[1, i] = -v[1] + w[0] * pz - w[2] * px
+        return Js
 
     @staticmethod
     def _wdls(J: np.ndarray, v: np.ndarray, w_joint: np.ndarray, lam: float) -> np.ndarray:
@@ -284,11 +336,19 @@ class WdlsFollowResolver(Node):
         gain = float(self.get_parameter("nullspace_gain").value)
         if gain < 1e-6:
             return np.zeros(6)
-        attract = np.asarray(self.get_parameter("nullspace_attract_ros").value, dtype=float)
+        key = (
+            "vlm_nullspace_attract_ros"
+            if self._follow_source() == "vlm"
+            else "nullspace_attract_ros"
+        )
+        attract = np.asarray(self.get_parameter(key).value, dtype=float)
         if attract.shape[0] < 6:
             attract = np.zeros(6)
-        # Soft pull toward attractor; stronger on J1 (anti-orbit), weaker fight on J5.
-        k = np.array([1.0, 0.4, 0.4, 0.3, 0.15, 0.0])
+        # Board: stronger on J1 (anti-orbit). VLM: hold J2/J3 near the desk start.
+        if self._follow_source() == "vlm":
+            k = np.array([0.5, 1.4, 1.4, 0.35, 0.2, 0.0])
+        else:
+            k = np.array([1.0, 0.4, 0.4, 0.3, 0.15, 0.0])
         qdot_pref = -gain * k * (self._q - attract[:6])
         if bool(self.get_parameter("lock_j6").value):
             qdot_pref[5] = 0.0
@@ -366,6 +426,7 @@ class WdlsFollowResolver(Node):
         now_s = self.get_clock().now().nanoseconds / 1e9
         quality_gate = float(self.get_parameter("quality_gate").value)
         coast_sec = float(self.get_parameter("coast_sec").value)
+        confirm_sec = float(self.get_parameter("confirm_sec").value)
         lost_timeout = float(self.get_parameter("lost_timeout_sec").value)
 
         if not self._have_js:
@@ -380,6 +441,7 @@ class WdlsFollowResolver(Node):
             # Fresh pose but bad quality — treat as lost.
             lost = True
         if lost:
+            self._confirm_t0 = 0.0
             if self._last_marker_ok:
                 self.get_logger().warn(
                     f"TARGET LOST q={self._tgt_quality:.2f} — coast {coast_sec:.2f}s"
@@ -407,11 +469,28 @@ class WdlsFollowResolver(Node):
         max_xy = float(self.get_parameter("max_marker_xy").value)
         max_z = float(self.get_parameter("max_marker_z").value)
         if abs(mx) > max_xy or abs(my) > max_xy or mz > max_z or mz < 0.05:
+            self._confirm_t0 = 0.0
             self._publish_zero_jog(stamp)
             self._phase = "reject"
             return
 
-        alpha = float(np.clip(self.get_parameter("opt_filter_alpha").value, 0.05, 1.0))
+        # Hold still until quality has been good for confirm_sec (blocks flicker-driven motion).
+        if not self._last_marker_ok:
+            if self._confirm_t0 <= 0.0:
+                self._confirm_t0 = now_s
+            if confirm_sec > 1e-4 and (now_s - self._confirm_t0) < confirm_sec:
+                self._phase = "confirm"
+                self._last_cmd_qdot[:] = 0.0
+                self._publish_zero_jog(stamp)
+                self._publish_status(
+                    board_ok=False, phase="confirm", quality=float(self._tgt_quality)
+                )
+                return
+
+        # Frozen VLM point is geometric. Filtering it lags the motion and hunts.
+        alpha = 1.0 if self._follow_source() == "vlm" else float(
+            np.clip(self.get_parameter("opt_filter_alpha").value, 0.05, 1.0)
+        )
         raw = np.array([mx, my, mz], dtype=float)
         if self._opt_filt is None:
             self._opt_filt = raw
@@ -423,12 +502,19 @@ class WdlsFollowResolver(Node):
         dy = float(self.get_parameter("desired_marker_in_ee_y").value)
         dz = self._desired_z()
         xy_err = math.hypot(mx - dx, my - dy)
-        z_err = abs(mz - dz)
-        hold_xy = float(self.get_parameter("hold_xy_m").value)
+        # VLM only recenters the box. Depth is reported, not driven.
+        center_only = self._follow_source() == "vlm"
+        z_err = 0.0 if center_only else abs(mz - dz)
+        # ~20 px / ~45 px at desk range (z≈0.26, fx≈600): stop hunting, hold AIM in box.
+        hold_xy = 0.008 if center_only else float(self.get_parameter("hold_xy_m").value)
         hold_z = float(self.get_parameter("hold_z_m").value)
         resume_xy = float(self.get_parameter("hold_resume_xy_m").value)
+        if center_only:
+            resume_xy = max(resume_xy, 0.020)
         resume_z = float(self.get_parameter("hold_resume_z_m").value)
         leave_hold = float(self.get_parameter("leave_hold_sec").value)
+        if center_only:
+            leave_hold = max(leave_hold, 0.30)
         on_target = xy_err <= hold_xy and z_err <= hold_z
 
         if not self._last_marker_ok:
@@ -436,10 +522,11 @@ class WdlsFollowResolver(Node):
                 f"TARGET DETECTED q={self._tgt_quality:.2f} opt=[{mx:.3f},{my:.3f},{mz:.3f}]"
             )
         self._last_marker_ok = True
+        self._confirm_t0 = 0.0
         self._coasting = False
 
         if self._phase == "hold":
-            leaving = xy_err > resume_xy or z_err > resume_z
+            leaving = xy_err > resume_xy or (not center_only and z_err > resume_z)
             if leaving:
                 if self._leave_hold_t <= 0.0:
                     self._leave_hold_t = now_s
@@ -462,62 +549,103 @@ class WdlsFollowResolver(Node):
                 return
 
         if on_target:
+            if self._settle_t0 <= 0.0:
+                self._settle_t0 = now_s
+            settle_need = 0.20 if center_only else 0.0
+            if (now_s - self._settle_t0) < settle_need:
+                self._last_cmd_qdot[:] = 0.0
+                self._publish_zero_jog(stamp)
+                self._publish_status(
+                    board_ok=True, phase="settle", xy=xy_err, z=mz, quality=self._tgt_quality
+                )
+                return
             if self._phase != "hold":
                 self.get_logger().info(
                     f"ON TARGET — hold xy={xy_err*100:.1f}cm z={mz*100:.1f}cm (CDC Quiet)"
                 )
             self._phase = "hold"
             self._leave_hold_t = 0.0
+            self._settle_t0 = 0.0
             self._last_cmd_qdot[:] = 0.0
             self._publish_zero_jog(stamp)
             self._publish_status(
                 board_ok=True, phase="hold", xy=xy_err, z=mz, quality=self._tgt_quality
             )
             return
+        self._settle_t0 = 0.0
 
         # Camera-frame velocity that reduces optical Spray Aim error.
         # Marker at +x ⇒ move camera +x so axis catches up (PBVS point feature).
         gain = float(self.get_parameter("linear_gain").value)
-        v_cam = gain * np.array([mx - dx, my - dy, mz - dz], dtype=float)
+        if center_only:
+            gain = min(gain, 0.85)
+        vz = 0.0 if center_only else (mz - dz)
+        v_cam = gain * np.array([mx - dx, my - dy, vz], dtype=float)
         err_n = float(np.linalg.norm(v_cam) / max(gain, 1e-6))
         near_m = max(1e-4, float(self.get_parameter("near_err_m").value))
-        near_min = float(np.clip(self.get_parameter("near_gain_min").value, 0.05, 1.0))
+        if center_only:
+            near_m = max(near_m, 0.06)
+        near_min = (
+            0.0
+            if center_only
+            else float(np.clip(self.get_parameter("near_gain_min").value, 0.05, 1.0))
+        )
         v_cam *= float(np.clip(err_n / near_m, near_min, 1.0))
         v_cam *= float(np.clip(self._tgt_quality, 0.0, 1.0))
         # Fade command while waiting for the next detection (brief occlusion).
         if lost_timeout > 1e-3 and age > 0.2:
             v_cam *= float(np.clip(1.0 - (age - 0.2) / max(lost_timeout - 0.2, 1e-3), 0.0, 1.0))
         max_lin = float(self.get_parameter("max_linear_vel").value)
+        if center_only:
+            max_lin = min(max_lin, 0.05)
         nrm = float(np.linalg.norm(v_cam))
         if nrm > max_lin and nrm > 1e-9:
             v_cam *= max_lin / nrm
 
-        try:
-            T_base_opt = tf_to_matrix(self._lookup(self.base_frame, self.optical_frame))
-        except Exception as exc:
+        jac = self._camera_jacobians()
+        if jac is None:
             now_ns = self.get_clock().now().nanoseconds
             if now_ns - self._last_warn_ns > 2e9:
                 self._last_warn_ns = now_ns
-                self.get_logger().warn(f"Waiting for TF: {exc}")
+                self.get_logger().warn("Waiting for TF: camera Jacobian")
             self._publish_zero_jog(stamp)
             return
-
-        v_base = T_base_opt[:3, :3] @ v_cam
-        J = self._geometric_jacobian_optical()
-        if J is None:
-            self._publish_zero_jog(stamp)
-            return
+        R, Jv, Jw = jac
 
         w_joint = np.asarray(self.get_parameter("joint_weights").value, dtype=float)
         if w_joint.shape[0] < 6:
             w_joint = np.array([4.0, 1.5, 1.5, 1.2, 0.55, 8.0])
+        w_joint = w_joint.copy()
         lam = float(self.get_parameter("dls_lambda").value)
-        qdot = self._wdls(J, v_base, w_joint, lam)
-        qdot = qdot + self._nullspace_term(J, qdot)
+        if center_only:
+            # Drive the box center toward AIM. J5 pitches the view; J2/J3 stay dear.
+            p_cam = np.array([mx, my, mz], dtype=float)
+            J = self._feature_jacobian_xy(p_cam, R, Jv, Jw)
+            task = -v_cam[:2]
+            attract = np.asarray(
+                self.get_parameter("vlm_nullspace_attract_ros").value, dtype=float
+            )
+            w_joint[1] = max(float(w_joint[1]), 8.0)
+            w_joint[2] = max(float(w_joint[2]), 8.0)
+            if attract.shape[0] >= 3 and self._have_js:
+                for i in (1, 2):
+                    err = abs(float(self._q[i]) - float(attract[i]))
+                    w_joint[i] *= 1.0 + (err / math.radians(18.0)) ** 2
+            qdot = self._wdls(J, task, w_joint, lam)
+            qdot = qdot + self._nullspace_term(J, qdot)
+        else:
+            J = Jv
+            v_base = R @ v_cam
+            qdot = self._wdls(J, v_base, w_joint, lam)
+            qdot = qdot + self._nullspace_term(J, qdot)
         if bool(self.get_parameter("lock_j6").value):
             qdot[5] = 0.0
         max_j = float(self.get_parameter("max_joint_vel").value)
         qdot = np.clip(qdot, -max_j, max_j)
+        if center_only:
+            # Shoulder and elbow may creep to help, not fold the arm away.
+            qdot[1] = float(np.clip(qdot[1], -0.22, 0.22))
+            qdot[2] = float(np.clip(qdot[2], -0.22, 0.22))
 
         self._phase = "track"
         self._last_cmd_qdot = qdot.copy()

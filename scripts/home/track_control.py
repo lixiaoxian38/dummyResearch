@@ -7,7 +7,7 @@
   python3 scripts/home/track_control.py pause     # cancel follow, hold pose (for jog)
 
   python3 scripts/home/track_control.py hub       # vision nodes + handeye TF, no LIVE
-  python3 scripts/home/track_control.py source charger  # board|charger (OK mid-LIVE)
+  python3 scripts/home/track_control.py source vlm      # board|charger|vlm (OK mid-LIVE)
 
 Follow params: dummy_moveit_ws/dummy_vision/config/follow_live.yaml
 """
@@ -34,7 +34,27 @@ from follow_session import save as save_follow_session  # noqa: E402
 
 
 def _follow_source() -> str:
-    return str(load_follow_session()["follow_source"])
+    src = str(load_follow_session()["follow_source"])
+    if src == "cup":
+        return "charger"
+    return src if src in ("board", "charger", "vlm") else "board"
+
+
+# FW deg start poses (must match cdc_home_seven / bridge constants).
+_START_POSE_FW = {
+    "board": [0.0, 0.0, 90.0, 0.0, 0.0, 0.0],
+    "charger": [0.0, -40.0, 120.0, 0.0, 70.0, 0.0],
+    # Held pose 2026-10-18 19:33, rounded from [2.97, 0.4, 90.0, -0.04, 74.91, -0.04].
+    "vlm": [3.0, 0.0, 90.0, 0.0, 75.0, 0.0],
+}
+
+
+def _start_preset(src: str | None = None) -> str:
+    """Bridge/home preset name for the active follow source."""
+    s = src or _follow_source()
+    if s == "vlm":
+        return "vlm"
+    return "charger" if s == "charger" else "handeye"
 
 
 def _bridge_ros_args() -> str:
@@ -225,6 +245,7 @@ def _ensure_handeye_tf() -> str:
 def _goto_via_bridge(preset: str) -> None:
     srv = {
         "handeye": "/cdc_servo_bridge/goto_handeye",
+        "charger": "/cdc_servo_bridge/goto_charger",
         "stow": "/cdc_servo_bridge/goto_stow",
     }[preset]
     cmd = (
@@ -266,12 +287,81 @@ def _home_exclusive(preset: str) -> None:
         raise RuntimeError(f"home {preset} failed rc={rc}")
 
 
+def _jog_fw(fw: list[float]) -> None:
+    """Absolute FW move through the running bridge (no second serial writer)."""
+    data = ",".join(str(float(x)) for x in fw)
+    cmd = (
+        "source /opt/ros/jazzy/setup.bash && "
+        f"source {WS}/install/setup.bash && "
+        "ros2 topic pub --once /cdc_servo_bridge/jog_fw "
+        f"std_msgs/msg/Float64MultiArray '{{data: [{data}]}}'"
+    )
+    subprocess.check_call(["bash", "-lc", cmd])
+
+
+def _clear_vlm_query() -> None:
+    cmd = (
+        "source /opt/ros/jazzy/setup.bash && "
+        f"source {WS}/install/setup.bash && "
+        "ros2 topic pub --once /tracking/vlm_query std_msgs/msg/String \"{data: ''}\""
+    )
+    subprocess.call(["bash", "-lc", cmd])
+
+
+def _wait_near(src: str, timeout_s: float = 30.0) -> bool:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _near_start_pose(src, tol_deg=12.0):
+            return True
+        time.sleep(0.4)
+    return _near_start_pose(src, tol_deg=12.0)
+
+
 def _home(preset: str) -> None:
+    if preset == "vlm":
+        if not _bridge_alive():
+            _log("no CDC bridge — exclusive home (Servo is not the writer)")
+            _home_exclusive(preset)
+            return
+        _log(f"jog to vlm start {_START_POSE_FW['vlm']}")
+        _jog_fw(_START_POSE_FW["vlm"])
+        if not _wait_near("vlm", 35.0):
+            raise RuntimeError("未回到 VLM 桌面初始位")
+        return
     if _bridge_alive():
         _goto_via_bridge(preset)
         return
     _log("no CDC bridge — exclusive home (Servo is not the writer)")
     _home_exclusive(preset)
+
+
+def return_vlm_start() -> None:
+    """Jog back to the VLM start pose. Keeps the phrase and leaves follow running."""
+    _home("vlm")
+    if not _bridge_trigger("/cdc_servo_bridge/release_servo", timeout_s=10):
+        _log("WARN: release_servo after vlm return failed")
+    _log("back at vlm start")
+
+
+def release_arm() -> None:
+    """Let Servo move again after a held return to the VLM start pose."""
+    if not _bridge_trigger("/cdc_servo_bridge/release_servo", timeout_s=10):
+        raise RuntimeError("release_servo failed")
+    _log("servo released")
+
+
+def rehome_vlm() -> None:
+    """Drop the phrase, jog to the desk start, and keep Servo held.
+
+    The page publishes the next phrase and waits for a box before release,
+    so the first look happens at the start pose.
+    """
+    _clear_vlm_query()
+    time.sleep(0.3)
+    _home("vlm")
+    if not _bridge_trigger("/cdc_servo_bridge/hold_servo", timeout_s=8):
+        _log("WARN: hold_servo after vlm rehome failed")
+    _log("vlm at start, servo held until the new phrase locks")
 
 
 def _params_files() -> str:
@@ -297,6 +387,7 @@ def _ensure_tracking_nodes(*, restart: bool = False) -> None:
     if restart:
         _kill("tracking_target_mux")
         _kill("charger_detector_node")
+        _kill("vlm_locator_node")
         _kill("cup_detector_node")
         _kill("nut_detector_node")
         _kill("aruco_detector_node")
@@ -312,13 +403,19 @@ def _ensure_tracking_nodes(*, restart: bool = False) -> None:
         "charger_detector_node",
         _params_files(),
     )
+    # ROS node always OK; GPU sidecar is separate (start_locateanything_server.sh).
+    _ros2_run_if_missing(
+        "vlm_locator_node",
+        "vlm_locator_node",
+        _params_files(),
+    )
 
 
 def _set_mux_source(src: str) -> None:
     """Push follow_source to mux + WDLS resolver (LIVE mid-switch OK)."""
     if src == "cup":
         src = "charger"
-    if src not in ("board", "charger"):
+    if src not in ("board", "charger", "vlm"):
         src = "board"
     env = os.environ.copy()
     for node in ("/tracking_target_mux", "/wdls_follow_resolver"):
@@ -395,20 +492,27 @@ def _fw_from_joint_states(timeout_s: float = 5.0) -> list[float] | None:
     return fw
 
 
-def _near_handeye(tol_deg: float = 20.0) -> bool:
-    """True if current FW pose is close to handeye start [0,0,90,0,0,0]."""
+def _near_start_pose(src: str | None = None, tol_deg: float = 20.0) -> bool:
+    """True if current FW pose is close to the start pose for this follow source."""
+    s = src or _follow_source()
+    preset = _start_preset(s)
+    target = _START_POSE_FW["charger" if preset == "charger" else "board"]
+    if s == "vlm":
+        target = _START_POSE_FW["vlm"]
     fw = _fw_from_joint_states()
     if fw is None:
-        _log("WARN: could not read /joint_states — will go handeye before follow")
+        _log(f"WARN: could not read /joint_states — will go {preset} before follow")
         return False
-    target = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
     err = max(abs(a - b) for a, b in zip(fw, target))
-    _log(f"pose vs handeye max|Δ|={err:.1f}° now={[round(x,1) for x in fw]} (tol {tol_deg:.0f}°)")
+    _log(
+        f"pose vs {preset} max|Δ|={err:.1f}° now={[round(x, 1) for x in fw]} "
+        f"tgt={target} (tol {tol_deg:.0f}°)"
+    )
     return err <= tol_deg
 
 
 def start_follow() -> None:
-    """Start LIVE Follow via WDLS. Auto-homes to handeye if still folded/far."""
+    """Start LIVE Follow via WDLS. Auto-homes to source start pose if far."""
     _kill("wdls_follow_resolver")
     _kill("aruco_servo_tracker")
     _kill("dummy_slider_gui.py")
@@ -425,10 +529,12 @@ def start_follow() -> None:
     else:
         _apply_bridge_locks()
 
-    # Folded / far poses cannot Spray-Aim (camera points wrong). Go handeye first.
-    if not _near_handeye(tol_deg=20.0):
-        _log("not near handeye — going handeye before LIVE follow")
-        _home("handeye")
+    src = _follow_source()
+    preset = _start_preset(src)
+    # Wrong camera aim (folded / side-looking) cannot Spray-Aim — home first.
+    if not _near_start_pose(src, tol_deg=20.0):
+        _log(f"not near {preset} — going {preset} before LIVE follow")
+        _home(preset)
         time.sleep(0.3)
 
     if not _bridge_trigger("/cdc_servo_bridge/release_servo", timeout_s=10):
@@ -440,7 +546,6 @@ def start_follow() -> None:
         raise RuntimeError(f"missing follow params: {FOLLOW_YAML}")
 
     _ensure_tracking_nodes(restart=False)
-    src = _follow_source()
     _set_mux_source(src)
 
     tr = (
@@ -452,12 +557,11 @@ def start_follow() -> None:
     )
     _spawn("wdls_resolver", ["bash", "-lc", tr], WS)
     _unpause_servo()
-    if src == "cup":
-        src = "charger"
-    standoff = "10cm" if src == "charger" else "20cm"
+    standoff = {"charger": "10cm", "vlm": "center-only, one lock"}.get(src, "20cm")
     _log(
         f"LIVE follow: WDLS resolver | optical {standoff} | src={src} | "
-        f"J4 free / J6 lock | handeye={handeye_src} | params={FOLLOW_YAML.name}+session"
+        f"start={preset} | J4 free / J6 lock | handeye={handeye_src} | "
+        f"params={FOLLOW_YAML.name}+session"
     )
 
 
@@ -473,7 +577,7 @@ def set_follow_source(src: str) -> None:
     """HUD / CLI: persist session + push mux & WDLS (works mid-LIVE)."""
     if src == "cup":
         src = "charger"
-    if src not in ("board", "charger"):
+    if src not in ("board", "charger", "vlm"):
         src = "board"
     save_follow_session(follow_source=src)
     _set_mux_source(src)
@@ -481,9 +585,11 @@ def set_follow_source(src: str) -> None:
 
 
 def go_handeye() -> None:
+    """HUD「回初始」: board → handeye; charger → desk look-down start."""
     _stop_follow()
-    _home("handeye")
-    _log("at handeye, follow stopped")
+    preset = _start_preset()
+    _home(preset)
+    _log(f"at {preset} start, follow stopped")
 
 
 def go_stow() -> None:
@@ -500,6 +606,9 @@ def main() -> int:
         "pause",
         "hub",
         "source",
+        "rehome",
+        "vlm_return",
+        "release",
     }:
         print(__doc__)
         return 2
@@ -514,6 +623,9 @@ def main() -> int:
                 "stop": go_stow,
                 "pause": pause_follow,
                 "hub": hub_vision,
+                "rehome": rehome_vlm,
+                "vlm_return": return_vlm_start,
+                "release": release_arm,
             }[cmd]()
     except Exception as exc:
         _log(f"ERROR: {exc}")

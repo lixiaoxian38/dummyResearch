@@ -1,0 +1,10 @@
+{
+  "name": "charger_start",
+  "description": "Charger follow start: camera pitched toward desk (FW deg). J2/J3 set height over table; J5 looks down.",
+  "saved_at": "2026-10-18",
+  "frame": "firmware_joint_degrees",
+  "joints": ["J1", "J2", "J3", "J4", "J5", "J6"],
+  "fw_deg": [0.0, -40.0, 120.0, 0.0, 70.0, 0.0],
+  "notes": "Vs board handeye [0,0,90,0,0,0]: J2=-40 lean in, J3=120 fold over desk, J5=+70 pitch toward desk (FW+ looks down on this mount; −70 pointed at sky). Follow J5 ceiling +75° leaves ~5°.",
+  "usage": "python3 scripts/home/cdc_home_seven.py --preset charger"
+}

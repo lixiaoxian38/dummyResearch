@@ -30,6 +30,7 @@ setup(
             "depth_detector_node = dummy_vision.depth_detector_node:main",
             "tracking_target_mux_node = dummy_vision.tracking_target_mux:main",
             "charger_detector_node = dummy_vision.charger_detector_node:main",
+            "vlm_locator_node = dummy_vision.vlm_locator_node:main",
             "wdls_follow_resolver_node = dummy_vision.wdls_follow_resolver_node:main",
         ],
     },

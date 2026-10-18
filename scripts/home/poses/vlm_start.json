@@ -1,0 +1,10 @@
+{
+  "name": "vlm_start",
+  "description": "VLM follow start: higher camera, wider desk view (FW deg).",
+  "saved_at": "2026-10-18",
+  "frame": "firmware_joint_degrees",
+  "joints": ["J1", "J2", "J3", "J4", "J5", "J6"],
+  "fw_deg": [3.0, 0.0, 90.0, 0.0, 75.0, 0.0],
+  "notes": "Rounded from the held pose [2.97, 0.4, 90.0, -0.04, 74.91, -0.04]. Start-follow, 回初始, and each new VLM phrase return here.",
+  "usage": "python3 scripts/home/cdc_home_seven.py --preset vlm"
+}

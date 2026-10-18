@@ -2,4 +2,4 @@
 # Speeds / standoff / WDLS weights stay in follow_live.yaml.
 /**:
   ros__parameters:
-    follow_source: charger
+    follow_source: vlm

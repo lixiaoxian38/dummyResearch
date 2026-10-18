@@ -8,7 +8,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 SESSION_YAML = REPO / "dummy_moveit_ws" / "dummy_vision" / "config" / "follow_session.yaml"
 
-VALID_SOURCES = ("board", "charger")
+VALID_SOURCES = ("board", "charger", "vlm")
 
 
 def load() -> dict:
@@ -21,6 +21,8 @@ def load() -> dict:
         s = line.split("#", 1)[0].strip()
         if s.startswith("follow_source:"):
             val = s.split(":", 1)[1].strip().strip("'\"")
+            if val == "cup":
+                val = "charger"
             if val in VALID_SOURCES:
                 source = val
     return {"follow_source": source}
@@ -29,6 +31,8 @@ def load() -> dict:
 def save(*, follow_source: str, follow_orientation: bool | None = None) -> None:
     del follow_orientation  # deprecated HUD mode; kept for call-site compat
     src = follow_source if follow_source in VALID_SOURCES else "board"
+    if src == "cup":
+        src = "charger"
     SESSION_YAML.parent.mkdir(parents=True, exist_ok=True)
     SESSION_YAML.write_text(
         (

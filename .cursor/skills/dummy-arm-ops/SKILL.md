@@ -33,9 +33,10 @@ bash scripts/home/stow.sh
 | 名字 | FW 度 | 用途 |
 |---|---|---|
 | `stow` | `0, -75, 180, 0, 0, 0` | 断电前收起 |
-| `handeye` | `0, 0, 90, 0, 0, 0` | 跟随起始（J1/J2=0，J3=90，J4/J5 从 0° 起） |
+| `handeye` | `0, 0, 90, 0, 0, 0` | 标定板跟随起始 |
+| `charger` | `0, -40, 120, 0, +70, 0` | 充电头跟随起始（朝桌面；本机 J5 正角低头） |
 | `handeye_calib` | `-8.7, 20, 90, 0, 60, 0` | 旧手眼标定起始 |
-| `lookdown` | `0, -48, 125, 0, -80, 0` | 旧朝下候选 |
+| `lookdown` | `0, -48, 125, 0, -80, 0` | 更俯的朝下候选 |
 
 ```bash
 # 串口必须空闲
@@ -51,8 +52,8 @@ HUD 三个按钮（只停 tracker，**不要杀 bridge**）：
 
 | 按钮 | 行为 |
 |---|---|
-| **开始跟随** | LIVE 跟随（离 handeye 远时会先自动回初始；关闭六轴拖动） |
-| **回初始** | 取消跟随，完整回到 `handeye` |
+| **开始跟随** | LIVE 跟随（离当前源起始位远时先自动回：板=`handeye`，充电头=`charger`；关闭六轴拖动） |
+| **回初始** | 取消跟随，回到当前源起始位（板 handeye / 充电头朝桌面） |
 | **停止收起** | 取消跟随，收到折叠 `stow` |
 | **六轴拖动** | 暂停跟随，打开滑条（经 `/cdc_servo_bridge/jog_fw`，不占串口）；再点关闭 |
 
@@ -63,13 +64,18 @@ HUD 三个按钮（只停 tracker，**不要杀 bridge**）：
 双击桌面 **Dummy 跟随控制台**，或 `bash scripts/home/start_tracking_hub.sh`。  
 按需拉起 ROS2 + MoveIt Servo（无 Fibre）+ D415 + CDC + 检测 + HUD。**不自动 LIVE、不 git pull、不起 Stream API。** 图标丢失时：`bash scripts/home/install_desktop_launcher.sh`。
 
-## 启动标定板跟随（必须先回 handeye）
+## 启动跟随（按源回对应起始位）
 
-起始位（FW）：**`[0, 0, 90, 0, 0, 0]`**（`scripts/home/poses/handeye_start.json`，J5 从 0° 起，跟随中不锁）。  
-每次开 LIVE / 标定板跟踪，先独占串口回这个位，再开 bridge + tracker。
+| 源 | 起始 FW | 文件 |
+|---|---|---|
+| 标定板 | `[0, 0, 90, 0, 0, 0]` | `poses/handeye_start.json` |
+| 充电头 | `[0, -40, 120, 0, +70, 0]` | `poses/charger_start.json`（J5=+70° 朝桌面） |
+| VLM | `[3, 0, 90, 0, +75, 0]` | `poses/vlm_start.json`（当前拖到位取整；开始跟随 / 回初始 / 换指令都回这里） |
 
-现阶段跟随：**喷枪瞄准**（光心 + 20 cm）+ 到位 **Hold / CDC Quiet**。运动由 **WDLS 解算器**（`wdls_follow_resolver_node`）经 Servo JointJog 下发；J4 自由、J6 锁。  
-HUD 目标开关（**LIVE 中可切**）：`标定板 | 充电头`（灰绿方块；板 20 cm / 充电头 10 cm）。  
+每次开 LIVE，离起始位远时会先经 bridge `goto_handeye` / `goto_charger` 再跟。
+
+现阶段跟随：**喷枪瞄准**（板 20 cm / 充电头 10 cm）+ **Hold / CDC Quiet**。运动由 **WDLS** → Servo JointJog；J4 自由、J6 锁。  
+HUD：`标定板 | 充电头`。  
 参数：`dummy_vision/config/follow_live.yaml` + `follow_session.yaml`。定案：`docs/跟随优化定案.md`。  
 总线：`/tracking/target_pose` + `/tracking/target_quality`。  
 手眼标定 `robot_effector_frame:=link5_1_1`（相机在 J5 壳体）。
